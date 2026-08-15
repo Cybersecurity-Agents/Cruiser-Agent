@@ -185,10 +185,10 @@ def main():
 
     # 主进程启动时确保靶场 VPN 已连接（spawn 的 worker 子进程会跳过）
     if os.environ.get("CRUISER_WORKER_ID") is None:
-        from cruiser.llm import get_deepseek_api_key, get_kimi_api_key
-        if not get_deepseek_api_key() and not get_kimi_api_key() and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        from cruiser.llm import get_deepseek_api_key, get_kimi_api_key, get_glm_api_key
+        if not get_deepseek_api_key() and not get_kimi_api_key() and not get_glm_api_key() and not os.environ.get("ANTHROPIC_AUTH_TOKEN"):
             print(
-                "[Main] 警告：未配置任何 LLM 密钥（DEEPSEEK_API_KEY / KIMI_API_KEY / ANTHROPIC_AUTH_TOKEN），"
+                "[Main] 警告：未配置任何 LLM 密钥（DEEPSEEK_API_KEY / KIMI_API_KEY / GLM_API_KEY / ANTHROPIC_AUTH_TOKEN），"
                 "claude 解题引擎与 watcher 将无法认证。请在项目根目录 .env 中配置。",
                 flush=True,
             )

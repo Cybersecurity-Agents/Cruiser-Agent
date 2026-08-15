@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -15,7 +16,10 @@ from typing import Any, Optional, Tuple
 #
 # 当前登记：
 #   - deepseek：解题引擎(claude CLI) 与 watcher 默认；
-#   - kimi(moonshot)：worker/watcher 指定 kimi-* 模型时自动路由。
+#   - kimi(moonshot)：worker/watcher 指定 kimi-* 模型时自动路由；
+#   - glm(腾讯 TokenHub)：worker/watcher 指定 glm-* 模型时自动路由。
+#     TokenHub 默认即公网 https 端点（tokenhub.tencentmaas.com），无比赛内网变体，
+#     --local 对其无影响；如需自建网关可用 GLM_ANTHROPIC_BASE_URL / GLM_BASE_URL 覆盖。
 # ---------------------------------------------------------------------------
 
 # 默认模型（可分别用环境变量覆盖）
@@ -34,6 +38,8 @@ class ProviderConfig:
     openai_base_url_env: str      # 覆盖 OpenAI 端点的环境变量名
     anthropic_base_url_local: str = ""  # 本地测试端点（--local / CRUISER_LOCAL=1 时用；原始官方域名）
     openai_base_url_local: str = ""     # 同上（OpenAI 兼容）
+    max_context_tokens: int = 1_000_000    # 模型真实上下文窗口（供 claude CLI 校正 auto-compact）
+    auto_compact_window: int = 800_000     # 提前触发上下文压缩的阈值
 
 
 def _local_mode() -> bool:
@@ -85,6 +91,22 @@ PROVIDERS: dict[str, ProviderConfig] = {
         anthropic_base_url_local="https://api.moonshot.cn/anthropic",
         openai_base_url_local="https://api.moonshot.cn/v1",
     ),
+    # GLM（智谱）经腾讯 TokenHub 聚合网关：统一兼容 Anthropic Messages 与 OpenAI Chat 协议。
+    # Anthropic 协议鉴权头为 x-api-key（与 ANTHROPIC_AUTH_TOKEN 发送方式一致）；
+    # OpenAI 协议为 Authorization: Bearer（langchain ChatOpenAI 默认）。key 通用。
+    "glm": ProviderConfig(
+        name="glm",
+        api_key_env="GLM_API_KEY",
+        anthropic_base_url="https://tokenhub.tencentmaas.com",
+        openai_base_url="https://tokenhub.tencentmaas.com/v1",
+        anthropic_base_url_env="GLM_ANTHROPIC_BASE_URL",
+        openai_base_url_env="GLM_BASE_URL",
+        # TokenHub 文档：glm-5.3 / glm-5.2 上下文 1M、最大输出 128K，与 DeepSeek 同规格。
+        # 注意 glm-5.1 / glm-5 / glm-5-turbo 仅 200K：使用这些老模型时请显式设置
+        # CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000（与 AUTO_COMPACT_WINDOW 相应调低）。
+        max_context_tokens=1_000_000,
+        auto_compact_window=800_000,
+    ),
 }
 
 # 模型名前缀 -> 提供方（小写匹配）。命中即路由到该提供方；都不命中用 DEFAULT_PROVIDER。
@@ -92,8 +114,19 @@ MODEL_PREFIX_TO_PROVIDER: dict[str, str] = {
     "deepseek": "deepseek",
     "kimi": "kimi",
     "moonshot": "kimi",
+    "glm": "glm",
+    "chatglm": "glm",
+    "zhipu": "glm",
 }
 DEFAULT_PROVIDER = "deepseek"
+
+_GLM_MODEL_RE = re.compile(r"^glm-?(\d.*)$", re.IGNORECASE)
+
+
+def _normalize_glm_model(model: str) -> str:
+    """glm 模型名规范化：TokenHub 模型 ID 为 glm-5.3 形式，容忍 glm5.3 / GLM5.3 写法。"""
+    m = _GLM_MODEL_RE.match((model or "").strip())
+    return f"glm-{m.group(1)}" if m else model
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +159,40 @@ def get_kimi_api_key() -> str:
     return _provider_api_key(PROVIDERS["kimi"])
 
 
+def get_glm_api_key() -> str:
+    """GLM（腾讯 TokenHub）密钥（仅从环境变量读取，缺失返回空串）。"""
+    return _provider_api_key(PROVIDERS["glm"])
+
+
 def get_solve_model() -> str:
-    """解题引擎（claude CLI）使用的模型。优先级：ANTHROPIC_MODEL > DEEPSEEK_MODEL > 默认。"""
-    return os.environ.get("ANTHROPIC_MODEL") or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_SOLVE_MODEL
+    """解题引擎（claude CLI）使用的模型。
+
+    优先级：CRUISER_MODEL > ANTHROPIC_MODEL > DEEPSEEK_MODEL > 默认。
+    glm 系模型名做规范化（glm5.3 -> glm-5.3），以匹配 TokenHub 的模型 ID。
+    """
+    model = os.environ.get("CRUISER_MODEL") or os.environ.get("ANTHROPIC_MODEL") or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_SOLVE_MODEL
+    if provider_for_model(model) == "glm":
+        return _normalize_glm_model(model)
+    return model
 
 
 def get_watcher_model() -> str:
-    """黑板 watcher 使用的模型（WATCHER_MODEL 覆盖，默认 deepseek-v4-pro）。"""
-    return os.environ.get("WATCHER_MODEL", DEFAULT_WATCHER_MODEL)
+    """黑板 watcher 使用的模型（WATCHER_MODEL 覆盖，默认 deepseek-v4-pro）。glm 系做规范化。"""
+    model = os.environ.get("WATCHER_MODEL", DEFAULT_WATCHER_MODEL)
+    if provider_for_model(model) == "glm":
+        return _normalize_glm_model(model)
+    return model
+
+
+def get_context_defaults(model: str) -> tuple[int, int]:
+    """返回 (最大上下文 token 数, auto-compact 触发窗口) 的提供方默认值。
+
+    供 claude_agent._claude_env 对 CLAUDE_CODE_MAX_CONTEXT_TOKENS /
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW 做 setdefault：DeepSeek 1M 窗口，GLM 约 200K。
+    用户显式设置的环境变量始终优先。
+    """
+    cfg = get_provider_config(provider_for_model(model))
+    return cfg.max_context_tokens, cfg.auto_compact_window
 
 
 # ---------------------------------------------------------------------------

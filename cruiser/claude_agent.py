@@ -403,13 +403,22 @@ def _claude_env() -> dict:
     env.update(get_claude_provider_env())
     env["IS_SANDBOX"] = "1"  # 允许 root 下使用 bypassPermissions
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-    # DeepSeek 上下文窗口为 1M。经 Anthropic 兼容端点接入时，Claude Code 会把
-    # deepseek-v4-flash 当作未知模型 ID 并假设错误的窗口大小，导致 auto-compact 触发时机不当
-    # （太晚则撞上真实上限报错，太早则频繁压缩浪费）。该 ID 不以 claude- 开头、不含 [1m]，
-    # 故 CLAUDE_CODE_MAX_CONTEXT_TOKENS 直接生效，声明真实窗口后按此提前压缩。
-    env.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "1000000")
-    # 在 ~800K 处提前触发压缩，为单轮大输出预留余量，避免逼近 1M 硬上限。
-    env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "800000")
+    # 经 Anthropic 兼容端点接入时，Claude Code 会把非 claude 模型 ID 当作未知模型并假设
+    # 错误的窗口大小（默认 200K），导致 auto-compact 触发时机不当（太晚则撞上真实上限
+    # 报错，太早则频繁压缩浪费）。上下文窗口按提供方取默认值（DeepSeek 1M；GLM 旗舰
+    # glm-5.2/5.3 同为 1M），声明真实窗口后按对应阈值提前压缩；用户显式设置优先。
+    from .llm import get_context_defaults, get_solve_model, provider_for_model
+    _model = get_solve_model()
+    _max_ctx, _compact_win = get_context_defaults(_model)
+    env.setdefault("CLAUDE_CODE_MAX_CONTEXT_TOKENS", str(_max_ctx))
+    env.setdefault("CLAUDE_CODE_AUTO_COMPACT_WINDOW", str(_compact_win))
+    # GLM-5.x（TokenHub）为始终思考模型：裸 Anthropic 协议请求缺省 thinking 会被网关拒绝
+    # （实测报 "该模型始终思考，不支持关闭思考；请使用 low、high 或 max"）。claude CLI
+    # 2.1.x 默认请求已能正常通过，此处显式 setdefault MAX_THINKING_TOKENS 作为防御层：
+    # 兼容不默认携带 thinking 的老版本 CLI，并给思考链一个明确上限（budget 为上限而非
+    # 实际消耗，计费按实际 token；32000 已实测通过 TokenHub 校验，不影响正常输出）。
+    if provider_for_model(_model) == "glm":
+        env.setdefault("MAX_THINKING_TOKENS", "32000")
     # PyGhidra 运行环境（Ghidra 本体 + JDK），供 Claude 编写的 pyghidra 脚本直接使用
     env.setdefault("GHIDRA_INSTALL_DIR", "/opt/ghidra_12.1.2_PUBLIC")
     env.setdefault("JAVA_HOME", "/usr/lib/jvm/java-21-openjdk-amd64")

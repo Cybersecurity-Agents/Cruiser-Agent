@@ -104,12 +104,22 @@ BENCHMARK_BASE_URL=https://<跑分平台地址>   # 平台 API 地址
 BENCHMARK_TOKEN=<跑分任务凭证>              # 由平台创建跑分任务后下发
 DEEPSEEK_API_KEY=<DeepSeek 密钥>           # 必填：解题引擎(claude CLI) 与 watcher 默认用
 KIMI_API_KEY=<Kimi/Moonshot 密钥>          # 选填：当 worker/watcher 指定 kimi 模型时使用
+GLM_API_KEY=<腾讯 TokenHub 密钥>           # 选填：当 worker/watcher 指定 glm 模型时使用
 ```
 
 `DEEPSEEK_API_KEY` 未配置且未设置 `ANTHROPIC_AUTH_TOKEN` 时，启动会打印告警且 LLM 无法认证。
 所有"连哪家模型/端点/用哪把 key"的逻辑集中在 `cruiser/llm.py`,并**按模型名自动路由提供方**:
-`kimi-*` 模型走 Moonshot 端点 + `KIMI_API_KEY`,其余(`deepseek-*`)走 DeepSeek 端点 + `DEEPSEEK_API_KEY`。
-因此 `--worker-models` 可混搭不同厂商,例如 `deepseek-v4-flash,deepseek-v4-flash,kimi-k3`。
+`kimi-*` 模型走 Moonshot 端点 + `KIMI_API_KEY`,`glm-*` 模型走腾讯 TokenHub 端点 + `GLM_API_KEY`,其余(`deepseek-*`)走 DeepSeek 端点 + `DEEPSEEK_API_KEY`。
+因此 `--worker-models` 可混搭不同厂商,例如 `deepseek-v4-flash,deepseek-v4-flash,kimi-k3,glm-5.3`。
+
+> **使用 GLM 模型**：在 `.env` 中配置 `GLM_API_KEY`，然后用 `CRUISER_MODEL=glm-5.3` 指定解题模型
+> （也兼容 `glm5.3` 写法，会自动规范化为 TokenHub 模型 ID `glm-5.3`）；watcher 可用
+> `WATCHER_MODEL=glm-5.3` 单独指定。GLM-5.x 为始终思考模型，框架会自动为 claude CLI
+> 开启 thinking（`MAX_THINKING_TOKENS=32000`，可调）。glm-5.3/5.2 上下文窗口为 1M
+> （框架默认按此管理压缩）；glm-5.1/5/5-turbo 等老模型为 200K，使用时请显式设置
+> `CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000`。
+> TokenHub 默认走公网端点 `https://tokenhub.tencentmaas.com`，可用
+> `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` 覆盖。
 
 > **端点默认值**:各提供方端点默认使用比赛内网形式(http + `.tsecbench.gw` 后缀,如
 > `http://api.deepseek.com.tsecbench.gw/v1`)。本地联网调试时加 `--local` 参数即切回原始官方
@@ -155,6 +165,9 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 | `BENCHMARK_BASE_URL` / `BENCHMARK_TOKEN` | 平台 API 地址与跑分凭证（必填） |
 | `DEEPSEEK_API_KEY` | DeepSeek 密钥（解题引擎与 watcher 默认使用） |
 | `KIMI_API_KEY` | Kimi/Moonshot 密钥（当模型为 `kimi-*` 时自动使用） |
+| `GLM_API_KEY` | 腾讯 TokenHub 密钥（当模型为 `glm-*` 时自动使用） |
+| `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` | GLM 的 Anthropic / OpenAI 兼容端点（默认 `https://tokenhub.tencentmaas.com`、`.../v1`） |
+| `CRUISER_MODEL` | 解题引擎模型（最高优先级，覆盖 `ANTHROPIC_MODEL`/`DEEPSEEK_MODEL`；推荐跨厂商指定方式，如 `glm-5.3`） |
 | `KIMI_ANTHROPIC_BASE_URL` / `KIMI_BASE_URL` | Kimi 的 Anthropic / OpenAI 兼容端点（默认比赛内网 `http://api.moonshot.cn.tsecbench.gw/anthropic`、`.../v1`；`--local` 切回 `https://api.moonshot.cn/...`） |
 | `DEEPSEEK_MODEL` / `ANTHROPIC_MODEL` | 解题引擎模型（默认 `deepseek-v4-flash`） |
 | `DEEPSEEK_BASE_URL` | DeepSeek OpenAI 兼容端点（默认比赛内网 `http://api.deepseek.com.tsecbench.gw/v1`；`--local` 切回 `https://api.deepseek.com/v1`） |
