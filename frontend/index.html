@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cruiser 控制台</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">C</div>
+          <div>
+            <div class="brand-name">Cruiser</div>
+            <div class="brand-subtitle">CTF Agent Console</div>
+          </div>
+        </div>
+
+        <nav class="nav-list" aria-label="主导航">
+          <button class="nav-item active" type="button" data-view="overview" title="总览">
+            <span class="icon" aria-hidden="true">⌂</span>
+            <span>总览</span>
+          </button>
+          <button class="nav-item" type="button" data-view="workers" title="Worker">
+            <span class="icon" aria-hidden="true">▦</span>
+            <span>Worker</span>
+          </button>
+          <button class="nav-item" type="button" data-view="blackboard" title="黑板">
+            <span class="icon" aria-hidden="true">◇</span>
+            <span>黑板</span>
+          </button>
+          <button class="nav-item" type="button" data-view="toolchain" title="工具链">
+            <span class="icon" aria-hidden="true">⚙</span>
+            <span>工具链</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-panel">
+          <div class="panel-label">镜像</div>
+          <div class="image-tag">cruiser:offline</div>
+          <div class="image-meta">linux/amd64 · OCI layout</div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">TSec Benchmark 自动解题</p>
+            <h1>Cruiser 运行控制台</h1>
+          </div>
+          <div class="top-actions">
+            <button class="icon-button" type="button" id="themeToggle" title="切换主题" aria-label="切换主题">
+              <span aria-hidden="true">◐</span>
+            </button>
+            <button class="button secondary" type="button" id="syncButton">
+              <span class="button-icon" aria-hidden="true">↻</span>
+              同步状态
+            </button>
+            <button class="button primary" type="button" id="runButton">
+              <span class="button-icon" aria-hidden="true">▶</span>
+              启动巡航
+            </button>
+          </div>
+        </header>
+
+        <section class="control-strip" aria-label="运行参数">
+          <label class="field">
+            <span>平台地址</span>
+            <input id="baseUrl" type="url" value="https://benchmark.tsec.local">
+          </label>
+          <label class="field compact">
+            <span>会话数</span>
+            <input id="sessions" type="number" min="1" max="12" value="5">
+          </label>
+          <label class="field">
+            <span>Worker 模型</span>
+            <select id="modelSelect">
+              <option>deepseek-v4-flash</option>
+              <option>deepseek-v4-pro</option>
+              <option>kimi-k3</option>
+              <option>mixed: flash + pro</option>
+            </select>
+          </label>
+          <label class="toggle">
+            <input id="hintToggle" type="checkbox" checked>
+            <span>三级启用提示</span>
+          </label>
+        </section>
+
+        <section class="metrics-grid" aria-label="关键指标">
+          <article class="metric accent-green">
+            <div class="metric-head">
+              <span>已解 Flag</span>
+              <span class="metric-icon" aria-hidden="true">✓</span>
+            </div>
+            <strong id="flagsSolved">18</strong>
+            <p>今日提交成功率 72%</p>
+          </article>
+          <article class="metric accent-blue">
+            <div class="metric-head">
+              <span>活跃容器</span>
+              <span class="metric-icon" aria-hidden="true">▣</span>
+            </div>
+            <strong id="activeContainers">3</strong>
+            <p>受 CRUISER_MAX_ACTIVE 限流</p>
+          </article>
+          <article class="metric accent-amber">
+            <div class="metric-head">
+              <span>平均步数</span>
+              <span class="metric-icon" aria-hidden="true">#</span>
+            </div>
+            <strong id="avgSteps">94</strong>
+            <p>按 [COUNT] 聚合统计</p>
+          </article>
+          <article class="metric accent-red">
+            <div class="metric-head">
+              <span>待复核</span>
+              <span class="metric-icon" aria-hidden="true">!</span>
+            </div>
+            <strong id="reviewCount">4</strong>
+            <p>来自 watcher 的高价值方向</p>
+          </article>
+        </section>
+
+        <section class="demo-result" id="demoResult" aria-live="polite">
+          <div>
+            <p class="eyebrow">Demo Result</p>
+            <h2 id="demoTitle">等待启动演示</h2>
+            <p id="demoDescription">点击“启动巡航”后，前端会模拟 Cruiser 从拉题到提交 flag 的完整流程。</p>
+          </div>
+          <code id="demoFlag">flag 暂未发现</code>
+        </section>
+
+        <section class="workspace-grid">
+          <article class="module queue-module">
+            <div class="module-header">
+              <div>
+                <h2>分层调度</h2>
+                <p>预处理、一级、二级、三级队列实时推进</p>
+              </div>
+              <div class="segmented" role="tablist" aria-label="队列视图">
+                <button class="segment active" type="button" data-filter="all">全部</button>
+                <button class="segment" type="button" data-filter="active">运行</button>
+                <button class="segment" type="button" data-filter="blocked">阻塞</button>
+              </div>
+            </div>
+            <div class="queue-board" id="queueBoard"></div>
+          </article>
+
+          <article class="module workers-module">
+            <div class="module-header">
+              <div>
+                <h2>Worker 编队</h2>
+                <p>多会话黑盒探索与 solver 补位</p>
+              </div>
+              <button class="icon-button" type="button" id="shuffleWorkers" title="重排模型" aria-label="重排模型">
+                <span aria-hidden="true">⇄</span>
+              </button>
+            </div>
+            <div class="worker-list" id="workerList"></div>
+          </article>
+
+          <article class="module blackboard-module">
+            <div class="module-header">
+              <div>
+                <h2>共享黑板</h2>
+                <p>跨会话事实、路径、口令和探索方向</p>
+              </div>
+              <span class="status-pill good">fcntl lock</span>
+            </div>
+            <div class="blackboard-list" id="blackboardList"></div>
+          </article>
+
+          <article class="module log-module">
+            <div class="module-header">
+              <div>
+                <h2>运行日志</h2>
+                <p>调度器、容器和 flag 提交输出</p>
+              </div>
+              <button class="icon-button" type="button" id="clearLogs" title="清空日志" aria-label="清空日志">
+                <span aria-hidden="true">⌫</span>
+              </button>
+            </div>
+            <pre class="log-stream" id="logStream" aria-live="polite"></pre>
+          </article>
+        </section>
+
+        <section class="toolchain-section">
+          <div class="section-title">
+            <h2>离线工具链</h2>
+            <p>镜像内置的安全工具和运行时能力</p>
+          </div>
+          <div class="tool-grid" id="toolGrid"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
