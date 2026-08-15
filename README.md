@@ -196,4 +196,6 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 
 ## 许可证
 
-本项目仅供安全研究与 CTF 竞赛学习使用。
+本项目以 [Apache License 2.0](LICENSE) 开源。
+
+**免责声明**：本项目仅供安全研究与 CTF 竞赛学习使用，请勿用于未授权的目标。使用本项目造成的一切后果由使用者自行承担。
