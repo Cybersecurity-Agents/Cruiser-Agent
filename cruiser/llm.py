@@ -18,8 +18,8 @@ from typing import Any, Optional, Tuple
 #   - deepseek：解题引擎(claude CLI) 与 watcher 默认；
 #   - kimi(moonshot)：worker/watcher 指定 kimi-* 模型时自动路由；
 #   - glm(腾讯 TokenHub)：worker/watcher 指定 glm-* 模型时自动路由。
-#     TokenHub 默认即公网 https 端点（tokenhub.tencentmaas.com），无比赛内网变体，
-#     --local 对其无影响；如需自建网关可用 GLM_ANTHROPIC_BASE_URL / GLM_BASE_URL 覆盖。
+#     默认走比赛内网网关（tokenhub.tencentmaas.com.tsecbench.gw），--local 切回
+#     TokenHub 公网 https 端点；亦可用 GLM_ANTHROPIC_BASE_URL / GLM_BASE_URL 覆盖。
 # ---------------------------------------------------------------------------
 
 # 默认模型（可分别用环境变量覆盖）
@@ -97,10 +97,12 @@ PROVIDERS: dict[str, ProviderConfig] = {
     "glm": ProviderConfig(
         name="glm",
         api_key_env="GLM_API_KEY",
-        anthropic_base_url="https://tokenhub.tencentmaas.com",
-        openai_base_url="https://tokenhub.tencentmaas.com/v1",
+        anthropic_base_url="http://tokenhub.tencentmaas.com.tsecbench.gw",
+        openai_base_url="http://tokenhub.tencentmaas.com.tsecbench.gw/v1",
         anthropic_base_url_env="GLM_ANTHROPIC_BASE_URL",
         openai_base_url_env="GLM_BASE_URL",
+        anthropic_base_url_local="https://tokenhub.tencentmaas.com",
+        openai_base_url_local="https://tokenhub.tencentmaas.com/v1",
         # TokenHub 文档：glm-5.3 / glm-5.2 上下文 1M、最大输出 128K，与 DeepSeek 同规格。
         # 注意 glm-5.1 / glm-5 / glm-5-turbo 仅 200K：使用这些老模型时请显式设置
         # CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000（与 AUTO_COMPACT_WINDOW 相应调低）。
