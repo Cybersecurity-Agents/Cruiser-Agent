@@ -506,6 +506,122 @@ def _flag_norm(flag: str) -> str:
     return (flag or "").strip()
 
 
+# ---------------------------------------------------------------------------
+# flag 形态判定（防误提交：CSS/代码片段等非 flag 文本）
+#
+# 三层防线：
+#   1. 形态正则 + 占位符黑名单（基础形态）；
+#   2. 前缀/正文黑名单：HTML 标签、CSS·JS 关键字前缀（div{...}、h1{...}），
+#      及 body 呈 CSS 属性:值 / 含分号声明串的模式（opacity:0.8、font-size:1.5em）；
+#   3. 前缀学习：flagstore 中已有平台确认的正确 flag 后，新候选前缀必须命中
+#      已确认前缀集合（本平台前缀统一，如 flag{/FLAG{）；命中已确认前缀者豁免黑名单。
+# ---------------------------------------------------------------------------
+_FLAG_FULL_RE = re.compile(r"[A-Za-z0-9_]{2,20}\{[A-Za-z0-9_+\-./:=]{8,300}\}")
+
+# 常见模板占位符（小写）：模型有时把提示词里的 flag 格式示例原样吐出
+_PLACEHOLDER_FLAGS = {
+    "flag{...}", "flag{flag}", "flag{xxx}", "flag{your_flag_here}", "flag{flag_content}",
+    "flag{实际flag内容}", "flag{实际内容}", "实际flag内容", "flag_content",
+}
+
+# 非 flag 前缀黑名单（小写）：HTML 标签 / CSS 选择器 / JS·CSS 关键字
+_NON_FLAG_PREFIXES = {
+    "div", "span", "body", "html", "head", "title", "style", "script", "link", "meta",
+    "p", "a", "img", "input", "button", "form", "table", "tr", "td", "th",
+    "ul", "ol", "li", "nav", "header", "footer", "section", "article", "aside", "main",
+    "h1", "h2", "h3", "h4", "h5", "h6", "figure", "video", "audio", "canvas", "svg",
+    "select", "option", "textarea", "label", "iframe", "pre", "code", "blockquote",
+    "function", "if", "else", "for", "while", "return", "class", "import", "var",
+    "let", "const", "new", "media", "keyframes", "font-face", "supports", "root",
+    "hover", "active", "focus", "before", "after", "not", "checked", "disabled",
+}
+
+# 非 flag body 黑名单模式：CSS「属性:值」（opacity:0.8 / font-size:1.5em / margin:0）与声明串（;）
+_NON_FLAG_BODY_RES = [
+    re.compile(r"^[a-zA-Z-]+\s*:\s*[0-9.]+%?(px|em|rem|vh|vw|s|deg)?;?$"),
+    re.compile(r";"),
+    re.compile(
+        r"^[a-z-]+\s*:\s*(auto|none|block|inline|inline-block|hidden|visible|absolute|relative|"
+        r"fixed|sticky|solid|dashed|bold|normal|center|left|right|both|cover|contain|inherit|"
+        r"initial|unset|nowrap|wrap|flex|grid|pointer|default)$",
+        re.IGNORECASE,
+    ),
+]
+
+# 默认可信前缀（小写）：最普遍的 CTF flag 前缀，豁免「前缀学习收紧」
+# （即使已确认前缀集合里没有它/与已知前缀不同，也始终放行；但仍受形态与黑名单约束）。
+_TRUSTED_PREFIXES = {"flag"}
+
+
+def _flag_shape_ok(s: str) -> bool:
+    """基础形态：PREFIX{body} 字符集 + 非占位符。"""
+    if not _FLAG_FULL_RE.fullmatch(s):
+        return False
+    return s.lower() not in _PLACEHOLDER_FLAGS
+
+
+def _flag_prefix_blacklisted(prefix: str) -> bool:
+    """前缀黑名单：HTML 标签 / CSS 选择器 / JS·CSS 关键字。"""
+    return prefix in _NON_FLAG_PREFIXES
+
+
+def _flag_body_blacklisted(s: str) -> bool:
+    """body 黑名单：呈 CSS 声明模式（属性:值 / 含分号）。任何前缀都不豁免。"""
+    body = s.split("{", 1)[1][:-1]
+    return any(r.search(body) for r in _NON_FLAG_BODY_RES)
+
+
+def known_flag_prefixes() -> set[str]:
+    """从 flagstore 学习本平台已确认正确的 flag 前缀集合（小写，跨题全局）。
+
+    无已确认记录时返回空集（冷启动，前缀学习不生效）。
+    """
+    try:
+        with _FlagStore() as st:
+            return {
+                f.split("{", 1)[0].lower()
+                for f in st.data.get("correct", {})
+                if isinstance(f, str) and "{" in f
+            }
+    except Exception:
+        return set()
+
+
+def looks_flaglike_static(s: str) -> bool:
+    """无 IO 静态判定（流解析热路径用）：形态 + 占位符 + 黑名单，不做前缀学习。"""
+    s = (s or "").strip()
+    if not _flag_shape_ok(s):
+        return False
+    prefix = s.split("{", 1)[0].lower()
+    return not _flag_prefix_blacklisted(prefix) and not _flag_body_blacklisted(s)
+
+
+def looks_flaglike(s: str) -> bool:
+    """完整判定（提交路径用）：静态规则 + flagstore 前缀学习。
+
+    判定顺序：
+    1. body CSS 模式黑名单始终生效（任何前缀都不豁免——flag{display:none} 仍是垃圾）；
+    2. 前缀命中已确认集合：豁免前缀黑名单与学习收紧（实证优先于规则）；
+    3. 前缀黑名单（HTML/CSS/JS 关键字）拦截；
+    4. 前缀学习收紧：已有确认前缀时，未知前缀一律不信任——
+       但 _TRUSTED_PREFIXES（flag/FLAG）默认放行，不受此限。
+    """
+    s = (s or "").strip()
+    if not _flag_shape_ok(s):
+        return False
+    if _flag_body_blacklisted(s):
+        return False
+    prefix = s.split("{", 1)[0].lower()
+    known = known_flag_prefixes()
+    if known and prefix in known:
+        return True
+    if _flag_prefix_blacklisted(prefix):
+        return False
+    if known and prefix not in _TRUSTED_PREFIXES:
+        return False
+    return True
+
+
 class _FlagStore:
     """在 flock 保护下对 _flagstore.json 做读改写。"""
 
@@ -609,6 +725,15 @@ def submit_flag(challenge_code: str, flag: str) -> str:
     """
     flag = (flag or "").strip()
     _print_color(f"[SUBMIT_FLAG] challenge_code={challenge_code} flag={flag}", "95;1")  # 亮洋红
+    # 形态防线：CSS/代码片段等明显非 flag 文本直接拒绝，不打平台、不记 wrong 表
+    if not looks_flaglike(flag):
+        known = sorted(known_flag_prefixes())
+        hint = f"本平台已确认的 flag 前缀为 {'/'.join(k + '{...}' for k in known)}；" if known else ""
+        _print_color(f"[SUBMIT_FLAG][REJECTED] 形态可疑，未提交平台: {flag[:80]}", "91;1")
+        return (
+            f"chanllege_code:{challenge_code} 拒绝提交：该字符串形态可疑，疑似 CSS/代码片段而非真实 flag，"
+            f"未提交平台。{hint}请确认它是题目环境（文件/响应/数据库等）中实际存在的完整 flag 后再提交。"
+        )
     # 跨进程 flag 存储预检：别题已交对的 flag / 本题已知错误 flag 直接短路，不打平台
     pre = _flagstore_precheck(challenge_code, flag)
     if pre is not None:

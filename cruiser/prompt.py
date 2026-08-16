@@ -106,7 +106,7 @@ WORKER_HINT_TEMPLATE = (
 # 工具箱一览（单一事实源：worker 与 solver 系统提示词共用；新增工具只改这里）
 _TOOLBOX = (
     "【工具箱一览】以下工具均已装好（命令在 PATH，Python 库用 /root/Cruiser/.venv/bin/python 调用；用法不明先 `<tool> -h`）：\n"
-    "- Web：sqlmap、fenjing(SSTI)、nuclei、ffuf、gobuster、dirb、whatweb、wfuzz、nikto、commix；目录扫描用任务给的 dirsearch 去重脚本；HTTP 客户端 httpx(支持 http2)/aiohttp(异步并发，可打竞态/请求走私)、h2(HTTP/2 底层)；\n"
+    "- Web：sqlmap、fenjing(SSTI)、ffuf、gobuster、dirb、whatweb、wfuzz、nikto、commix；目录扫描用任务给的 dirsearch 去重脚本；HTTP 客户端 httpx(支持 http2)/aiohttp(异步并发，可打竞态/请求走私)、h2(HTTP/2 底层)；\n"
     "- 反序列化/JWT：phpggc(PHP)、ysoserial(Java)、ysoserial.net(.NET，经 mono；WPF 系 gadget 不可用，改用 *Mono 链如 TypeConfuseDelegateMono + BinaryFormatter/LosFormatter/SoapFormatter/NetDataContractSerializer)、rogue-jndi(JNDI/Log4Shell)、jwt_tool、flask-unsign；\n"
     "- 网络/内网/渗透：nmap、ncat、socat、tshark、smbclient、ldapsearch、snmpwalk、whois、dig、impacket(venv)、metasploit(msfconsole/msfvenom，带 postgres 库)；\n"
     "- 口令/hash 破解：hydra、john、hashcat、medusa、hashid、fcrackzip、pdfcrack；字典见 resource/；\n"
@@ -115,7 +115,7 @@ _TOOLBOX = (
     "- 密码学：pycryptodome、gmpy2、sympy、z3(venv 库)；\n"
     "- 取证/隐写：binwalk、foremost、steghide、zsteg、outguess、exiftool、zbarimg、pngcheck、fls(sleuthkit)、qpdf、xxd；\n"
     "- 区块链：forge/cast/anvil(Foundry)、多版本 solc、slither、web3(venv)；\n"
-    "- 其它：ddddocr(验证码 OCR，自带模型)、jq；离线漏洞库 /root/Cruiser/kb（nuclei-templates/vulhub/PayloadsAllTheThings）。\n"
+    "- 其它：ddddocr(验证码 OCR，自带模型)、jq；离线漏洞库 /root/Cruiser/kb（nuclei-templates/vulhub/PayloadsAllTheThings，供按 CVE/组件名 grep 检索 PoC）。\n"
 )
 
 CLAUDE_SYSTEM_PROMPT = (

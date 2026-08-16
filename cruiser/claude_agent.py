@@ -47,11 +47,6 @@ _SUBMIT_INVOKE_RE = re.compile(
 # flag{...} 形态候选提取
 # 只抠「像真 flag 的外壳+内容」：拒绝源码里 startswith('flag{') 扫到下一个 } 的片段
 _FLAG_PATTERN_RE = re.compile(r"[A-Za-z0-9_]{2,20}\{[A-Za-z0-9_+\-./:=]{8,300}\}")
-# 常见模板占位符（小写）：模型有时把提示词里的 flag 格式示例原样吐出，一律不当真 flag
-_PLACEHOLDER_FLAGS = {
-    "flag{...}", "flag{flag}", "flag{xxx}", "flag{your_flag_here}", "flag{flag_content}",
-    "flag{实际flag内容}", "flag{实际内容}", "实际flag内容", "flag_content", "flag{...}",
-}
 
 
 # 同一段文本里超过这个数量的 flag{...} 视为爆破/枚举输出，禁止自动提交
@@ -71,19 +66,17 @@ def _unique_flag_cands(text: str) -> list[str]:
 
 
 def _looks_like_flag(s: str) -> bool:
-    """PREFIX{body}：body 只允许 flag 常见字符，拒绝引号/空格/括号等源码碎片。"""
-    s = (s or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_]{2,20}\{[A-Za-z0-9_+\-./:=]{8,300}\}", s):
-        return False
-    if s.lower() in _PLACEHOLDER_FLAGS:
-        return False
-    return True
+    """热路径静态判定（委托 tools.looks_flaglike_static，无 IO）：
+    形态 + 占位符 + HTML/CSS/JS 黑名单。提交判定请用 tools.looks_flaglike（含前缀学习）。"""
+    from .tools import looks_flaglike_static
+    return looks_flaglike_static(s)
 
 
 def _submit_flag_directly(code: str, flag: str) -> str:
     """程序化提交一个 flag（复用 tools.submit_flag 的 SDK+重试+标记）。返回其输出字符串。
     仅自动提交走这里；字符集限制也只加在这一层，不拦模型自己调 submit_flag.py。"""
-    if not code or not flag or not _looks_like_flag(flag):
+    from .tools import looks_flaglike
+    if not code or not flag or not looks_flaglike(flag):
         return ""
     try:
         from .tools import submit_flag as _submit_flag_tool
@@ -607,8 +600,9 @@ def _run_one_session(target: str, hint: str, code: str, worker_id: str, ws_dir: 
 
     def _verify_flag(cand: str) -> bool:
         """权威校验：由框架亲自向平台提交该 flag，仅当平台回 correct/duplicate 才算真。
-        不信任模型输出/文本标记；对同一候选只核实一次。"""
-        if not code or not cand or not _looks_like_flag(cand) or cand in verified:
+        不信任模型输出/文本标记；对同一候选只核实一次。形态判定含前缀学习（完整版）。"""
+        from .tools import looks_flaglike
+        if not code or not cand or not looks_flaglike(cand) or cand in verified:
             return False
         verified.add(cand)
         out = _submit_flag_directly(code, cand)
@@ -653,10 +647,17 @@ def _run_one_session(target: str, hint: str, code: str, worker_id: str, ws_dir: 
                         confirmed_flag = submitted
                         flag_json = json.dumps({"flag": submitted}, ensure_ascii=False)
                         break
-                # 文本里的 flag{...} 只收集、不当场交（源码/爆破输出会误匹配）
+                # 文本里出现少量合格 flag{...} 当场交；同一段超过上限视为爆破，不自动交
                 blob = _unique_flag_cands(text or "")
                 if len(blob) <= _AUTO_SUBMIT_MAX_PER_BLOB:
-                    flag_candidates.update(blob)
+                    for fm in blob:
+                        flag_candidates.add(fm)
+                        if flag_json is None and _verify_flag(fm):
+                            confirmed_flag = fm
+                            flag_json = json.dumps({"flag": fm}, ensure_ascii=False)
+                            break
+                if flag_json:
+                    break
                 if not quiet:
                     for t in tools:
                         print(f"[TOOL] {t}", flush=True)
@@ -679,9 +680,15 @@ def _run_one_session(target: str, hint: str, code: str, worker_id: str, ws_dir: 
                 for rt in _iter_tool_result_texts(msg):
                     blob = _unique_flag_cands(rt or "")
                     if len(blob) <= _AUTO_SUBMIT_MAX_PER_BLOB:
-                        flag_candidates.update(blob)
+                        for fm in blob:
+                            flag_candidates.add(fm)
+                            if flag_json is None and _verify_flag(fm):
+                                confirmed_flag = fm
+                                flag_json = json.dumps({"flag": fm}, ensure_ascii=False)
                     if rt.strip():
                         recent.append("Observation: " + rt.strip()[:400])
+                if flag_json:
+                    break
             elif etype == "result":
                 # 会话结束（success / error_max_turns / error_*）
                 if not quiet:
