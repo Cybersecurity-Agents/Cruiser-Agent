@@ -725,15 +725,9 @@ def submit_flag(challenge_code: str, flag: str) -> str:
     """
     flag = (flag or "").strip()
     _print_color(f"[SUBMIT_FLAG] challenge_code={challenge_code} flag={flag}", "95;1")  # 亮洋红
-    # 形态防线：CSS/代码片段等明显非 flag 文本直接拒绝，不打平台、不记 wrong 表
-    if not looks_flaglike(flag):
-        known = sorted(known_flag_prefixes())
-        hint = f"本平台已确认的 flag 前缀为 {'/'.join(k + '{...}' for k in known)}；" if known else ""
-        _print_color(f"[SUBMIT_FLAG][REJECTED] 形态可疑，未提交平台: {flag[:80]}", "91;1")
-        return (
-            f"chanllege_code:{challenge_code} 拒绝提交：该字符串形态可疑，疑似 CSS/代码片段而非真实 flag，"
-            f"未提交平台。{hint}请确认它是题目环境（文件/响应/数据库等）中实际存在的完整 flag 后再提交。"
-        )
+    # 注意：本工具是「模型主动提交」通道，不做任何形态拦截——LLM 想交什么就交什么，
+    # 由平台判错并记 wrong 表。looks_flaglike 系列规则只拦框架侧的自动提交
+    # （正则抠取候选的 _verify_flag / watcher 兜底），见 claude_agent.py。
     # 跨进程 flag 存储预检：别题已交对的 flag / 本题已知错误 flag 直接短路，不打平台
     pre = _flagstore_precheck(challenge_code, flag)
     if pre is not None:
