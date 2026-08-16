@@ -40,12 +40,13 @@ def _max_turns_per_session() -> int:
         return 0
 # 提交 flag 成功的外部确认标记（与 tools.submit_flag 输出保持一致）
 _FLAG_OK_MARKERS = ("提交flag正确", "已经提交成功过了")
-# 从 Bash 命令行中提取提交给 submit_flag.py 的 flag 参数
-_SUBMIT_ARG_RE = re.compile(r"""submit_flag\.py\s+\S+\s+['"]([^'"]+)['"]""")
-# 兜底（未加引号）：排除 shell 元字符，避免把管道 | / 重定向等误当成 flag 参数
-_SUBMIT_ARG_RE_FALLBACK = re.compile(r"""submit_flag\.py\s+\S+\s+([^\s'"|;&><`]+)""")
+# 只认「调用」submit_flag.py CODE FLAG，不认路径里碰巧出现这个文件名（如 grep .../submit_flag.py）
+_SUBMIT_INVOKE_RE = re.compile(
+    r"""(?:^|[\s;|&])(?:\S*/)?submit_flag\.py\s+([A-Za-z0-9]+-\d+)\s+(?:'([^']+)'|"([^"]+)"|([^\s'"|;&><`]+))"""
+)
 # flag{...} 形态候选提取
-_FLAG_PATTERN_RE = re.compile(r"flag\{[^}\r\n]{1,300}\}", re.IGNORECASE)
+# 只抠「像真 flag 的外壳+内容」：拒绝源码里 startswith('flag{') 扫到下一个 } 的片段
+_FLAG_PATTERN_RE = re.compile(r"[A-Za-z0-9_]{2,20}\{[A-Za-z0-9_+\-./:=]{8,300}\}")
 # 常见模板占位符（小写）：模型有时把提示词里的 flag 格式示例原样吐出，一律不当真 flag
 _PLACEHOLDER_FLAGS = {
     "flag{...}", "flag{flag}", "flag{xxx}", "flag{your_flag_here}", "flag{flag_content}",
@@ -53,16 +54,26 @@ _PLACEHOLDER_FLAGS = {
 }
 
 
+# 同一段文本里超过这个数量的 flag{...} 视为爆破/枚举输出，禁止自动提交
+_AUTO_SUBMIT_MAX_PER_BLOB = 2
+
+
+def _unique_flag_cands(text: str) -> list[str]:
+    """从一段文本提取去重后的合法 flag 候选，保持出现顺序。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _FLAG_PATTERN_RE.findall(text or ""):
+        if not _looks_like_flag(m) or m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
+
+
 def _looks_like_flag(s: str) -> bool:
-    """粗校验一个字符串是否像真 flag：非空、长度>=4、含字母数字（挡掉 "|" 等纯符号垃圾），
-    且不是模板占位符（如 flag{...}、<flag>、含省略号/尖括号，或已知占位串）。"""
+    """PREFIX{body}：body 只允许 flag 常见字符，拒绝引号/空格/括号等源码碎片。"""
     s = (s or "").strip()
-    if len(s) < 4:
-        return False
-    if re.search(r"[A-Za-z0-9]", s) is None:
-        return False
-    # 占位符/模板：省略号、尖括号，或已知占位串一律拒绝
-    if "..." in s or "…" in s or "<" in s or ">" in s:
+    if not re.fullmatch(r"[A-Za-z0-9_]{2,20}\{[A-Za-z0-9_+\-./:=]{8,300}\}", s):
         return False
     if s.lower() in _PLACEHOLDER_FLAGS:
         return False
@@ -70,8 +81,9 @@ def _looks_like_flag(s: str) -> bool:
 
 
 def _submit_flag_directly(code: str, flag: str) -> str:
-    """程序化提交一个 flag（复用 tools.submit_flag 的 SDK+重试+标记）。返回其输出字符串。"""
-    if not code or not flag:
+    """程序化提交一个 flag（复用 tools.submit_flag 的 SDK+重试+标记）。返回其输出字符串。
+    仅自动提交走这里；字符集限制也只加在这一层，不拦模型自己调 submit_flag.py。"""
+    if not code or not flag or not _looks_like_flag(flag):
         return ""
     try:
         from .tools import submit_flag as _submit_flag_tool
@@ -128,9 +140,11 @@ _WATCHER_PROMPT_TEMPLATE = (
     "（如「SSRF 端点 POST /probe」「入口应用为 Smart Logistics 看板」），具体地址由各会话用当前注入的 target；\n"
     "5. suggest_tasks：基于黑板已知信息与最近活动，推荐接下来值得探索的方向"
     "（方向级、可执行、一句话，例如「测试 /upload 的文件上传绕过」「用已发现口令尝试后台登录」）；"
-    "已在待认领或执行中列表里的方向不要重复；没有好建议就留空；一次最多 2 条；\n"
+    "已在待认领或执行中列表里的方向不要重复；没有好建议就留空；一次最多 2 条；"
+    "若题目提示给出了有序步骤，只发布能映射到某一步的方向，映射不上的（尤其扫 /24、枚举 Host、爆破 operator、调 OCR 等提示未点名的支线）一律不发布；\n"
     "6. retire_tasks：若待认领方向列表中有明显重复（语义相同仅措辞不同）、已被黑板事实覆盖"
-    "（如早已完成）或已过时无价值的方向，填其任务 id（t-xxxxxx）予以移除，保持任务板精炼；\n"
+    "（如早已完成）或已过时无价值的方向，填其任务 id（t-xxxxxx）予以移除，保持任务板精炼；"
+    "题目提示已点名利用原语/路径时，主动下架『爆破 admin/operator、扫同段 /24、枚举 Host、调 OCR』等偏离提示的方向；\n"
     "7. 没有任何变化时，各字段都返回空列表。\n"
     '严格输出 JSON：{{"add": ["..."], "update": [{{"old": "...", "new": "..."}}], '
     '"remove": ["..."], "suggest_tasks": ["..."], "retire_tasks": ["t-xxxxxx"]}}'
@@ -211,16 +225,19 @@ _ATTEMPTED_FLAGS_LOCK = threading.Lock()
 def _watcher_try_submit_flags(code: str, worker_id: str, *texts: str) -> Optional[str]:
     """watcher 兜底提交：从给定文本中提取 flag{...} 候选，进程内去重后程序化提交。
 
-    命中平台确认时，打印 {"flag":X}（供 main.py 调度器 reader 捕获为 winner、停止该题）并返回该 JSON。
+    命中平台确认时，打印 [WATCHER SUBMIT]（调度器只认平台确认标记，不认裸 {"flag"} JSON）。
     可用 CRUISER_WATCHER_SUBMIT=0 关闭。
     """
     if os.environ.get("CRUISER_WATCHER_SUBMIT", "1") != "1" or not code:
         return None
     cands: "set[str]" = set()
     for t in texts:
-        for m in _FLAG_PATTERN_RE.findall(t or ""):
-            cands.add(m)
-    for cand in sorted((c for c in cands if _looks_like_flag(c)), key=len, reverse=True):
+        blob = _unique_flag_cands(t)
+        # 一段里出现一堆 flag 是爆破输出，不自动交
+        if len(blob) > _AUTO_SUBMIT_MAX_PER_BLOB:
+            continue
+        cands.update(blob)
+    for cand in sorted(cands, key=len, reverse=True):
         key = f"{code}|{cand}"
         with _ATTEMPTED_FLAGS_LOCK:
             if key in _ATTEMPTED_FLAGS:
@@ -498,11 +515,12 @@ def _capture_submitted_flag(message: dict) -> Optional[str]:
             continue
         inp = block.get("input") or {}
         cmdline = str(inp.get("command") or "") if isinstance(inp, dict) else ""
-        if "submit_flag.py" not in cmdline:
+        m = _SUBMIT_INVOKE_RE.search(cmdline)
+        if not m:
             continue
-        m = _SUBMIT_ARG_RE.search(cmdline) or _SUBMIT_ARG_RE_FALLBACK.search(cmdline)
-        if m:
-            return m.group(1)
+        flag = m.group(2) or m.group(3) or m.group(4) or ""
+        if _looks_like_flag(flag):
+            return flag
     return None
 
 
@@ -626,18 +644,6 @@ def _run_one_session(target: str, hint: str, code: str, worker_id: str, ws_dir: 
                 print(f"[COUNT] {step_counter[0]}", flush=True)
                 msg = evt.get("message") or {}
                 text, tools = _extract_text_and_tools(msg)
-                if not quiet:
-                    for t in tools:
-                        print(f"[TOOL] {t}", flush=True)
-                    if text.strip():
-                        print(f"[Claude] {text.strip()[:300]}", flush=True)
-                # 记录活动摘要供 watcher 审阅
-                digest_parts = []
-                if text.strip():
-                    digest_parts.append("Thought: " + text.strip()[:300])
-                digest_parts.extend("Action: " + t for t in tools)
-                if digest_parts:
-                    recent.append("\n".join(digest_parts))
                 submitted = _capture_submitted_flag(msg)
                 if submitted and _looks_like_flag(submitted):
                     last_submitted_flag = submitted
@@ -647,19 +653,33 @@ def _run_one_session(target: str, hint: str, code: str, worker_id: str, ws_dir: 
                         confirmed_flag = submitted
                         flag_json = json.dumps({"flag": submitted}, ensure_ascii=False)
                         break
-                # 收集 assistant 文本里出现的合法 flag{...} 候选（供收尾权威校验）
-                for fm in _FLAG_PATTERN_RE.findall(text or ""):
-                    if _looks_like_flag(fm):
-                        flag_candidates.add(fm)
+                # 文本里的 flag{...} 只收集、不当场交（源码/爆破输出会误匹配）
+                blob = _unique_flag_cands(text or "")
+                if len(blob) <= _AUTO_SUBMIT_MAX_PER_BLOB:
+                    flag_candidates.update(blob)
+                if not quiet:
+                    for t in tools:
+                        print(f"[TOOL] {t}", flush=True)
+                    if text.strip():
+                        # 压成单行，避免 Thought 里的 JSON 被父进程按行误判为最终 {"flag"}
+                        preview = text.strip()[:300].replace("\n", " ").replace("\r", " ")
+                        print(f"[Claude] {preview}", flush=True)
+                # 记录活动摘要供 watcher 审阅
+                digest_parts = []
+                if text.strip():
+                    digest_parts.append("Thought: " + text.strip()[:300])
+                digest_parts.extend("Action: " + t for t in tools)
+                if digest_parts:
+                    recent.append("\n".join(digest_parts))
                 # 每 6 步触发一次黑板 watcher（后台线程，不阻塞流解析）
                 if session_step % 6 == 0:
                     _maybe_trigger_watcher()
             elif etype == "user":
                 msg = evt.get("message") or {}
                 for rt in _iter_tool_result_texts(msg):
-                    for fm in _FLAG_PATTERN_RE.findall(rt or ""):
-                        if _looks_like_flag(fm):
-                            flag_candidates.add(fm)
+                    blob = _unique_flag_cands(rt or "")
+                    if len(blob) <= _AUTO_SUBMIT_MAX_PER_BLOB:
+                        flag_candidates.update(blob)
                     if rt.strip():
                         recent.append("Observation: " + rt.strip()[:400])
             elif etype == "result":

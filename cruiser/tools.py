@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import fcntl
 from pathlib import Path
 import json
 from typing import Optional, Literal, List, Dict, Any, Union
@@ -483,12 +484,135 @@ class SubmitFlagInput(BaseModel):
     flag: str = Field(..., description="要提交的 flag")
 
 
+# ---------------------------------------------------------------------------
+# 跨进程 flag 存储：所有 worker/solver 子进程共享一份磁盘状态（JSON + flock）。
+#   - correct: {flag值: 归属题目code} —— 某 flag 一旦被某题交对，其它题再交同一 flag 直接拒绝
+#     （常见误交别题 flag）；同题再交不拦截。
+#   - wrong:   {题目code: [错误flag,...]} —— 每题各自维护错误 flag 表（同一 flag 对 A 错、对 B 可能对，
+#     故按题隔离）；已知错误 flag 直接判错，不再打平台，避免反复无效提交。
+# ---------------------------------------------------------------------------
+def _flagstore_paths() -> tuple[str, str]:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    reports = os.path.join(root, "reports")
+    try:
+        os.makedirs(reports, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(reports, "_flagstore.json"), os.path.join(reports, "_flagstore.lock")
+
+
+def _flag_norm(flag: str) -> str:
+    """归一化 flag 用于比较：去首尾空白。"""
+    return (flag or "").strip()
+
+
+class _FlagStore:
+    """在 flock 保护下对 _flagstore.json 做读改写。"""
+
+    def __init__(self):
+        self.store_path, self.lock_path = _flagstore_paths()
+        self._lf = None
+
+    def __enter__(self):
+        self._lf = open(self.lock_path, "a+")
+        fcntl.flock(self._lf, fcntl.LOCK_EX)
+        try:
+            with open(self.store_path, "r", encoding="utf-8") as f:
+                self.data = json.load(f)
+        except Exception:
+            self.data = {}
+        self.data.setdefault("correct", {})
+        self.data.setdefault("wrong", {})
+        return self
+
+    def save(self):
+        tmp = self.store_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.store_path)
+        except Exception:
+            pass
+
+    def __exit__(self, *exc):
+        try:
+            if self._lf is not None:
+                fcntl.flock(self._lf, fcntl.LOCK_UN)
+                self._lf.close()
+        except Exception:
+            pass
+
+
+def _flagstore_precheck(code: str, flag: str) -> Optional[str]:
+    """提交前查存储：返回非 None 表示应直接短路（不打平台），字符串即返回给调用方。"""
+    f = _flag_norm(flag)
+    if not f:
+        return None
+    try:
+        with _FlagStore() as st:
+            owner = st.data["correct"].get(f)
+            if owner is not None and owner != code:
+                _print_color(
+                    f"[SUBMIT_FLAG][REJECTED] 该 flag 属于其他题目 {owner}，非本题 {code}，拒绝提交", "91;1")
+                return (
+                    f"chanllege_code:{code} 拒绝提交：该 flag 是其他题目（{owner}）已提交正确的 flag，"
+                    f"不属于本题，请勿再提交此 flag，继续为本题寻找正确 flag。"
+                )
+            if owner == code:
+                _print_color(f"[SUBMIT_FLAG][ALREADY SOLVED] 本题该 flag 已交过（本地记录）", "93;1")
+                return f"chanllege_code:{code} 这题目已经提交成功过了"
+            if f in (st.data["wrong"].get(code) or []):
+                _print_color(f"[SUBMIT_FLAG][KNOWN WRONG] 本题已知错误 flag，跳过提交", "91;1")
+                return f"chanllege_code:{code} 提交的 flag 错误（本题已知的错误 flag，请勿重复提交，换方向寻找）"
+    except Exception:
+        return None
+    return None
+
+
+def _flagstore_record_correct(code: str, flag: str) -> None:
+    f = _flag_norm(flag)
+    if not f:
+        return
+    try:
+        with _FlagStore() as st:
+            st.data["correct"][f] = code
+            # 若曾被本题误记为错误，纠正
+            wl = st.data["wrong"].get(code)
+            if wl and f in wl:
+                st.data["wrong"][code] = [x for x in wl if x != f]
+            st.save()
+    except Exception:
+        pass
+
+
+def _flagstore_record_wrong(code: str, flag: str) -> None:
+    f = _flag_norm(flag)
+    if not f:
+        return
+    try:
+        with _FlagStore() as st:
+            # 已被任何题交对的 flag 不记为错误
+            if st.data["correct"].get(f):
+                return
+            wl = st.data["wrong"].setdefault(code, [])
+            if f not in wl:
+                wl.append(f)
+            st.save()
+    except Exception:
+        pass
+
+
 @tool("submit_flag", args_schema=SubmitFlagInput, return_direct=False)
 def submit_flag(challenge_code: str, flag: str) -> str:
     """提供 challenge_code 和 flag，通过 tsec-benchmark SDK 提交当前 CTF 题目 Flag。
     返回提交结果或错误信息。
     """
+    flag = (flag or "").strip()
     _print_color(f"[SUBMIT_FLAG] challenge_code={challenge_code} flag={flag}", "95;1")  # 亮洋红
+    # 跨进程 flag 存储预检：别题已交对的 flag / 本题已知错误 flag 直接短路，不打平台
+    pre = _flagstore_precheck(challenge_code, flag)
+    if pre is not None:
+        return pre
     try:
         client = get_benchmark_client()
     except Exception as e:
@@ -502,7 +626,9 @@ def submit_flag(challenge_code: str, flag: str) -> str:
             res = client.submit_flag(challenge_code, flag)
             if not res.correct:
                 _print_color("[SUBMIT_FLAG][INCORRECT] 提交的 flag 错误", "91;1")  # 亮红
+                _flagstore_record_wrong(challenge_code, flag)  # 记入本题错误表
                 return f"chanllege_code:{challenge_code} 提交的 flag 错误"
+            _flagstore_record_correct(challenge_code, flag)  # 记入全局正确表（归属本题）
             _print_color(
                 f"[SUBMIT_FLAG][OK] 提交正确，本次得分 {res.awarded}，累计 {res.cumulative_score}，"
                 f"flag 进度 {res.correct_flag_count}/{res.total_flag_count}",
@@ -523,7 +649,8 @@ def submit_flag(challenge_code: str, flag: str) -> str:
                 )
             return base
         except DuplicateSubmit:
-            # 幂等：同一 flag 已正确提交过
+            # 幂等：同一 flag 已正确提交过 —— 记入全局正确表（归属本题）
+            _flagstore_record_correct(challenge_code, flag)
             _print_color("[SUBMIT_FLAG][ALREADY SOLVED] 该 flag 已提交成功过", "93;1")  # 亮黄
             return f"chanllege_code:{challenge_code} 这题目已经提交成功过了"
         except (TSecConnectionError, InternalError, ResourceUnavailable) as e:

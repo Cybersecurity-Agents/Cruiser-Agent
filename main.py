@@ -16,7 +16,6 @@ import random
 import requests
 from cruiser.tools import get_benchmark_client
 from cruiser.taskboard import claim_task
-from cruiser.claude_agent import _looks_like_flag
 from tsec_benchmark import InvalidState, TSecError
 
 
@@ -515,7 +514,7 @@ def main():
             continue
 
     # 多会话并发：启动子进程并行扫描，实时将每个会话的输出打印到标准输出；
-    # 谁先输出含有 flag 的 JSON，就停止所有会话。
+    # 收题只认 SDK 轮询（is_completed / flag 进度），不解析 worker 日志。
     num = max(1, int(sessions))
 
     def spawn_worker(idx: int, target: str, code: str | None, hint_text: str | None, env_overrides: dict | None = None, model: str | None = None):
@@ -642,30 +641,40 @@ def main():
 
     # -------- 新流程：预处理(50,不看提示) -> 一级(100,不看提示) -> 二级(150,不看提示) -> 三级(200,四级起看提示) --------
     count_re = re.compile(r"\[COUNT\]\s*(\d+)")
-    # 多 flag 判定：解析 submit_flag 工具打印的「flag 进度 X/Y」（来自提交调用的同步返回，无滞后）。
-    flag_progress_re = re.compile(r"flag 进度\s*(\d+)\s*/\s*(\d+)")
 
-    def _note_progress_and_win(grp: dict, line: str) -> bool:
-        """解析并记录 flag 进度；仅当 X>=Y（全部 flag 到手）时置 winner 返回 True。"""
-        m = flag_progress_re.search(line)
-        if not m:
-            return False
+    def _sdk_mark_completed(groups: dict) -> None:
+        """以平台 list_challenges 为准判定是否解出，不解析 worker stdout。"""
         try:
-            x, y = int(m.group(1)), int(m.group(2))
+            challenges = get_benchmark_client().list_challenges()
         except Exception:
-            return False
-        grp["flag_total"] = max(grp.get("flag_total", 0), y)
-        grp["flag_correct"] = max(grp.get("flag_correct", 0), x)
-        if y >= 1 and x >= y:
-            grp["winner"] = line
-            return True
-        return False
-
-    def _json_flag_is_final(grp: dict) -> bool:
-        """worker 输出最终 {"flag"} JSON 时：单 flag/总数未知视为完成；多 flag 未集齐则不停。"""
-        total = grp.get("flag_total", 0)
-        correct = grp.get("flag_correct", 0)
-        return not (total > 1 and correct < total)
+            return
+        by_code = {ch.unique_code: ch for ch in challenges}
+        for code, grp in groups.items():
+            if grp.get("winner") is not None:
+                continue
+            ch = by_code.get(code)
+            if ch is None:
+                continue
+            if getattr(ch, "is_completed", False):
+                grp["winner"] = f"[SDK] {code} is_completed"
+                try:
+                    print(f"[{code}] [STAGE] 平台确认本题已完成，结束本轮", flush=True)
+                except Exception:
+                    pass
+                continue
+            try:
+                total = int(getattr(ch, "flag_count", 0) or 0)
+                correct = int(getattr(ch, "correct_flag_count", 0) or 0)
+            except Exception:
+                continue
+            grp["flag_total"] = max(grp.get("flag_total", 0), total)
+            grp["flag_correct"] = max(grp.get("flag_correct", 0), correct)
+            if total >= 1 and correct >= total:
+                grp["winner"] = f"[SDK] {code} flag {correct}/{total}"
+                try:
+                    print(f"[{code}] [STAGE] 平台 flag 进度 {correct}/{total}，结束本轮", flush=True)
+                except Exception:
+                    pass
 
     def run_parallel_stage(codes: list[str], items: dict[str, dict], step_threshold: float, prefetch_hint: bool, disable_hint: bool, kill_map: dict[str, threading.Event] | None = None) -> tuple[set[str], set[str]]:
         """并行对多个题目运行一轮，达到阈值或出 flag 即停止每个题目的会话组。
@@ -749,24 +758,6 @@ def main():
                 if grp["winner"] is not None or grp["stop_threshold"] or grp["kill_evt"].is_set():
                     break
                 line = raw.rstrip("\n")
-                # JSON flag?（仅接受合法非空 flag，杜绝 {"flag":null}/"|" 之类误判解出）
-                try:
-                    obj = json.loads(line)
-                    if isinstance(obj, dict) and isinstance(obj.get("flag"), str) and _looks_like_flag(obj["flag"]):
-                        print(prefix + line, flush=True)
-                        # 多 flag 未集齐时不停：仅单 flag/总数未知或已集齐才判胜出
-                        if _json_flag_is_final(grp):
-                            grp["winner"] = line
-                            break
-                        continue
-                except Exception:
-                    pass
-                if grp["kill_evt"].is_set():
-                    break
-                # 多 flag 完成判定：submit_flag 返回「flag 进度 X/Y」，X>=Y 才算整题解出
-                if _note_progress_and_win(grp, line):
-                    print(prefix + line, flush=True)
-                    break
                 # COUNT
                 m = count_re.search(line)
                 if m:
@@ -804,19 +795,6 @@ def main():
                     if _solver_stage_over(grp):
                         break
                     line = raw.rstrip("\n")
-                    try:
-                        obj = json.loads(line)
-                        if isinstance(obj, dict) and isinstance(obj.get("flag"), str) and _looks_like_flag(obj["flag"]):
-                            print(prefix + line, flush=True)
-                            if _json_flag_is_final(grp):
-                                grp["winner"] = line
-                                break
-                            continue
-                    except Exception:
-                        pass
-                    if _note_progress_and_win(grp, line):
-                        print(prefix + line, flush=True)
-                        break
                     print(prefix + line, flush=True)
 
             while not _solver_stage_over(grp):
@@ -888,8 +866,13 @@ def main():
             st.start()
             grp["solver_threads"].append(st)
 
-        # 等待所有题目完成本轮（阈值或 flag）
+        # 等待所有题目完成本轮（阈值或平台确认解出）
+        last_sdk_poll = 0.0
         while True:
+            now = time.time()
+            if now - last_sdk_poll >= 2.0:
+                _sdk_mark_completed(groups)
+                last_sdk_poll = now
             all_done = True
             for code, grp in groups.items():
                 if grp["kill_evt"].is_set():
