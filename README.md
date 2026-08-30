@@ -43,7 +43,7 @@ Cruiser/
 ├── main.py                  # CLI 入口：平台调度、多会话并发、分层调度、容器/进程治理
 ├── blackboard_hook.py       # Claude Code 钩子：黑板/任务板硬注入模型上下文
 ├── kill_orphans.py          # 悬空 worker/claude 进程清理兜底
-├── frontend/                # 运行监控面板（静态页面：题目队列/worker 状态/黑板/任务板可视化）
+├── frontend/                # 运行台静态资源（由 cruiser/dashboard.py 提供）
 ├── tools/                   # Agent 调用的 CLI 封装脚本
 │   ├── submit_flag.py       # 命令行提交 flag（供 Agent 调用，经 SDK 平台确认）
 │   ├── dirsearch_scan.py    # 跨会话去重的目录扫描 CLI（同一 URL 只实扫一次，其余复用）
@@ -55,6 +55,8 @@ Cruiser/
 │   ├── claude_agent.py      # 当前解题引擎：claude CLI 驱动 + 黑板 watcher
 │   ├── taskboard.py         # 任务板读写（文件锁 + 原子重写）
 │   ├── llm.py               # LLM 提供者：解题(DeepSeek) / watcher(deepseek-v4-pro)
+│   ├── dashboard.py         # 运行台 HTTP：快照 / 黑板 / 任务板 / 日志
+│   ├── runtime.py           # 调度器运行态快照（供运行台读取）
 │   ├── prompt.py            # 系统提示词与任务模板
 │   ├── tools.py             # SDK 客户端、submit_flag、dirsearch/xss 等工具
 │   └── agent.py             # 旧版手写 ReAct 引擎（已弃用，保留供参考）
@@ -73,8 +75,7 @@ Cruiser/
 > `kb/bin/nuclei` 超过 GitHub 单文件 100MB 限制，需从 [nuclei Releases](https://github.com/projectdiscovery/nuclei/releases) 自行下载。
 > 亦可用 `CRUISER_KB_DIR` 指向已有知识库目录。缺少 `kb/` 不影响主流程，仅降低 PoC 本地检索能力。
 
-> **监控面板**：`frontend/` 为纯静态页面，直接用浏览器打开 `frontend/index.html` 即可预览
-> （当前为演示数据；对接实时数据源可自行改造 `app.js`）。
+> **监控面板**：调度主进程会在 `http://127.0.0.1:8765` 拉起运行台（题目队列、黑板、任务板、flag、worker 日志）。也可用 `uv run python -m cruiser.dashboard` 单独打开（只读 `reports/`）。`CRUISER_DASHBOARD=0` 关闭；`CRUISER_DASHBOARD_PORT` / `CRUISER_DASHBOARD_HOST` 改端口与监听地址。
 
 ## 环境要求
 

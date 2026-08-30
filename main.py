@@ -16,6 +16,8 @@ import random
 import requests
 from cruiser.tools import get_benchmark_client
 from cruiser.taskboard import claim_task
+from cruiser import runtime
+from cruiser.dashboard import start_dashboard
 from tsec_benchmark import InvalidState, TSecError
 
 
@@ -194,6 +196,7 @@ def main():
         ensure_vpn_connected()
         # 关闭所有遗留容器，从干净状态开始
         close_all_containers()
+        start_dashboard()
 
     DIFF_RANK = {"easy": 0, "medium": 1, "hard": 2}
 
@@ -586,6 +589,12 @@ def main():
             env=env,
             start_new_session=True,
         )
+        p.cruiser_meta = {
+            "idx": idx,
+            "model": model or env.get("ANTHROPIC_MODEL") or "",
+            "ws": env.get("CRUISER_WORKSPACE_DIR") or "",
+            "kind": "explorer",
+        }
         # 注册到全局进程表，供退出清理使用
         with worker_procs_lock:
             worker_procs.add(p)
@@ -635,6 +644,13 @@ def main():
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, env=env, start_new_session=True,
         )
+        p.cruiser_meta = {
+            "idx": sid,
+            "model": SOLVER_MODEL,
+            "ws": env.get("CRUISER_WORKSPACE_DIR") or "",
+            "kind": "solver",
+            "task": task_text,
+        }
         with worker_procs_lock:
             worker_procs.add(p)
         return p
@@ -658,6 +674,10 @@ def main():
             if getattr(ch, "is_completed", False):
                 grp["winner"] = f"[SDK] {code} is_completed"
                 try:
+                    runtime.stage_winner(code, grp["winner"])
+                except Exception:
+                    pass
+                try:
                     print(f"[{code}] [STAGE] 平台确认本题已完成，结束本轮", flush=True)
                 except Exception:
                     pass
@@ -669,8 +689,16 @@ def main():
                 continue
             grp["flag_total"] = max(grp.get("flag_total", 0), total)
             grp["flag_correct"] = max(grp.get("flag_correct", 0), correct)
+            try:
+                runtime.stage_flags(code, grp["flag_correct"], grp["flag_total"])
+            except Exception:
+                pass
             if total >= 1 and correct >= total:
                 grp["winner"] = f"[SDK] {code} flag {correct}/{total}"
+                try:
+                    runtime.stage_winner(code, grp["winner"])
+                except Exception:
+                    pass
                 try:
                     print(f"[{code}] [STAGE] 平台 flag 进度 {correct}/{total}，结束本轮", flush=True)
                 except Exception:
@@ -748,6 +776,29 @@ def main():
                 "solver_stop": threading.Event(),
                 "solver_threads": [],
             }
+            try:
+                wlist = []
+                for i, entry in enumerate(procs, start=1):
+                    meta = getattr(entry["proc"], "cruiser_meta", {}) or {}
+                    wlist.append({
+                        "id": str(i),
+                        "kind": "explorer",
+                        "pid": entry["proc"].pid,
+                        "model": meta.get("model") or "",
+                        "ws": meta.get("ws") or "",
+                        "alive": True,
+                        "count": 0,
+                    })
+                runtime.stage_begin(
+                    code,
+                    stage=runtime.stage_name_for_threshold(int(step_threshold)),
+                    threshold=int(step_threshold),
+                    target=target,
+                    hint_enabled=bool(prefetch_hint) and not bool(disable_hint),
+                    workers=wlist,
+                )
+            except Exception:
+                pass
 
         def reader_thread(code: str, p: subprocess.Popen, idx: int, wave: int):
             grp = groups[code]
@@ -764,6 +815,10 @@ def main():
                     try:
                         c = int(m.group(1))
                         grp["counts"][idx] = c
+                        try:
+                            runtime.stage_count(code, str(idx), c)
+                        except Exception:
+                            pass
                         # 所有 worker 均为主力波（wave=2），全部计入步数阈值
                         if wave == 2 and c >= step_threshold and grp["winner"] is None:
                             try:
@@ -775,6 +830,10 @@ def main():
                     except Exception:
                         pass
                 print(prefix + line, flush=True)
+                try:
+                    runtime.push_log(code, f"S{idx}", line)
+                except Exception:
+                    pass
 
         def _solver_stage_over(grp) -> bool:
             return grp["winner"] is not None or grp["stop_threshold"] or grp["kill_evt"].is_set() or grp["solver_stop"].is_set()
@@ -796,12 +855,23 @@ def main():
                         break
                     line = raw.rstrip("\n")
                     print(prefix + line, flush=True)
+                    try:
+                        runtime.push_log(code, f"SOLVER{sid}", line)
+                        m = count_re.search(line)
+                        if m:
+                            runtime.stage_count(code, f"solver{sid}", int(m.group(1)))
+                    except Exception:
+                        pass
 
             while not _solver_stage_over(grp):
                 # 回收已退出的 solver
                 for sid, p in list(active.items()):
                     if p.poll() is not None:
                         active.pop(sid, None)
+                        try:
+                            runtime.solver_down(code, sid)
+                        except Exception:
+                            pass
                         with worker_procs_lock:
                             worker_procs.discard(p)
                 # 补位：FIFO 认领新任务（claim 即擦除，天然去重）
@@ -823,6 +893,17 @@ def main():
                             pass
                         continue
                     active[sid] = p
+                    try:
+                        meta = getattr(p, "cruiser_meta", {}) or {}
+                        runtime.solver_up(
+                            code, sid,
+                            pid=p.pid,
+                            task=claimed["text"],
+                            model=meta.get("model") or SOLVER_MODEL,
+                            ws=meta.get("ws") or "",
+                        )
+                    except Exception:
+                        pass
                     try:
                         print(f"[{code}:SOLVER{sid}] 领取并执行: {claimed['text'][:80]}", flush=True)
                     except Exception:
@@ -880,11 +961,15 @@ def main():
                 if grp["winner"] is None and not grp["stop_threshold"]:
                     # 检查进程是否全部退出
                     any_alive = False
-                    for entry in grp["procs"]:
+                    for idx, entry in enumerate(grp["procs"], start=1):
                         p = entry["proc"]
                         if p.poll() is None:
                             any_alive = True
-                            break
+                        else:
+                            try:
+                                runtime.worker_down(code, str(idx))
+                            except Exception:
+                                pass
                     if any_alive:
                         all_done = False
                         break
@@ -952,6 +1037,11 @@ def main():
                 flagged.add(code)
             else:
                 remaining.add(code)
+        for code, grp in groups.items():
+            try:
+                runtime.stage_end(code, flagged=grp.get("winner") is not None)
+            except Exception:
+                pass
         return flagged, remaining, skipped
 
     preprocessed: set[str] = set()
@@ -1221,6 +1311,40 @@ def main():
             with stage_lock:
                 tier3_threads[code] = t3
             t3.start()
+
+        try:
+            with stage_lock:
+                pre_run = list(preproc_threads)
+                t1_run = list(tier1_threads)
+                t2_run = list(tier2_threads)
+                t3_run = list(tier3_threads)
+                t1_wait = [c for c in tier1 if c not in tier1_threads]
+                t2_wait = [c for c in tier2 if c not in tier2_threads]
+                t3_wait = [c for c in tier3 if c not in tier3_threads]
+                solved_list = list(solved)
+                inflight = _inflight_count()
+                preprocessed_snap = set(preprocessed)
+            pre_wait = [
+                c for c in present
+                if c not in preprocessed_snap and c not in pre_run
+            ]
+            runtime.set_scheduler(
+                items=items,
+                solved=solved_list,
+                queues={
+                    "preprocess": {"running": pre_run, "waiting": pre_wait},
+                    "tier1": {"running": t1_run, "waiting": t1_wait},
+                    "tier2": {"running": t2_run, "waiting": t2_wait},
+                    "tier3": {"running": t3_run, "waiting": t3_wait},
+                },
+                max_active=MAX_INFLIGHT,
+                inflight=inflight,
+                worker_models=worker_models,
+                solver_model=SOLVER_MODEL,
+                local=bool(os.environ.get("CRUISER_LOCAL")),
+            )
+        except Exception:
+            pass
 
         # 小憩，等待下一轮调度
         time.sleep(1.0)
