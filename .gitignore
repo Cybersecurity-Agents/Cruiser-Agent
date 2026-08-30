@@ -1,10 +1,14 @@
 # 凭证与环境
 .env
 *.ovpn
-vpn/
 
-# 运行时产物
-reports/
+# vpn 配置（空目录入库，ovpn 不入库）
+vpn/*
+!vpn/.gitkeep
+
+# 运行时产物（空目录入库，内容不入库）
+reports/*
+!reports/.gitkeep
 analysis/
 *.log
 __pycache__/

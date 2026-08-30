@@ -60,9 +60,9 @@ Cruiser/
 │   └── agent.py             # 旧版手写 ReAct 引擎（已弃用，保留供参考）
 ├── resource/                # 用户名/密码/XSS payload 字典
 ├── kb/                      # 离线漏洞知识库（git submodule：vulhub / nuclei-templates / PayloadsAllTheThings；nuclei 二进制需自行下载）
-├── vpn/                     # 靶场 VPN 配置（*.ovpn，由平台下发，不入库）
+├── vpn/                     # 靶场 VPN 配置（空目录入库；*.ovpn 由平台下发，不入库）
 ├── doc/                     # SDK_API.md（平台 SDK 文档）+ TECHNICAL_DESIGN.md（技术方案）
-└── reports/                 # 运行时共享黑板 / 任务板 / 提示文件（自动生成，不入库）
+└── reports/                 # 运行时共享黑板 / 任务板 / 提示文件（空目录入库；内容自动生成，不入库）
 ```
 
 > **离线知识库说明**：`kb/` 下三个目录是 git submodule，分别链接
