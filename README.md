@@ -59,16 +59,19 @@ Cruiser/
 │   ├── tools.py             # SDK 客户端、submit_flag、dirsearch/xss 等工具
 │   └── agent.py             # 旧版手写 ReAct 引擎（已弃用，保留供参考）
 ├── resource/                # 用户名/密码/XSS payload 字典
-├── kb/                      # 离线漏洞知识库（不入库，需自行准备：vulhub / nuclei-templates / PayloadsAllTheThings / bin/nuclei）
+├── kb/                      # 离线漏洞知识库（git submodule：vulhub / nuclei-templates / PayloadsAllTheThings；nuclei 二进制需自行下载）
 ├── vpn/                     # 靶场 VPN 配置（*.ovpn，由平台下发，不入库）
 ├── doc/                     # SDK_API.md（平台 SDK 文档）+ TECHNICAL_DESIGN.md（技术方案）
 └── reports/                 # 运行时共享黑板 / 任务板 / 提示文件（自动生成，不入库）
 ```
 
-> **离线知识库说明**：`kb/` 未随仓库分发。请自行准备 [vulhub](https://github.com/vulhub/vulhub)、
+> **离线知识库说明**：`kb/` 下三个目录是 git submodule，分别链接
+> [vulhub](https://github.com/vulhub/vulhub)、
 > [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates)、
-> [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings) 与 nuclei 二进制，
-> 或通过 `CRUISER_KB_DIR` 指向已有知识库目录。缺少 `kb/` 不影响主流程，仅降低 PoC 本地检索能力。
+> [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)。
+> clone 时加 `--recurse-submodules` 即可拉下（只存指针，不把上游文件打进本仓库）。
+> `kb/bin/nuclei` 超过 GitHub 单文件 100MB 限制，需从 [nuclei Releases](https://github.com/projectdiscovery/nuclei/releases) 自行下载。
+> 亦可用 `CRUISER_KB_DIR` 指向已有知识库目录。缺少 `kb/` 不影响主流程，仅降低 PoC 本地检索能力。
 
 > **监控面板**：`frontend/` 为纯静态页面，直接用浏览器打开 `frontend/index.html` 即可预览
 > （当前为演示数据；对接实时数据源可自行改造 `app.js`）。
@@ -87,9 +90,18 @@ Cruiser/
 # 安装 uv（如未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
+# 克隆（含 kb/ 三个 submodule）
+git clone --recurse-submodules https://github.com/TJR181/Cruiser-Agent.git
+cd Cruiser-Agent
+
+# 若已经 clone 过、尚未初始化 submodule：
+git submodule update --init --recursive
+
 # 安装依赖
 uv sync
 ```
+
+可选：从 [nuclei Releases](https://github.com/projectdiscovery/nuclei/releases) 下载对应平台的 zip，把 `nuclei` 可执行文件放到 `kb/bin/nuclei`。不装也不影响主流程。
 
 > 注:`uv sync` 只安装 `pyproject.toml` 声明的核心依赖；解题过程中 Agent 还会按需临时加装
 > 其它 Python 包(如 `web3`/`slither`/`angr` 相关)。离线部署镜像为保证一致性，直接整份分发

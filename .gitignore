@@ -13,8 +13,9 @@ __pycache__/
 # 虚拟环境与依赖
 .venv/
 
-# 离线知识库（体积大，需另行获取，见 README）
-kb/
+# nuclei 二进制（单文件超过 GitHub 100MB 限制，见 README 下载方式）
+kb/bin/nuclei
+kb/bin/nuclei.exe
 
 # 辅助脚本（含环境相关路由，按需自备）
 connect_vpn.sh

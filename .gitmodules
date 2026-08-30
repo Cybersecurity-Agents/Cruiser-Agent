@@ -1,0 +1,12 @@
+[submodule "kb/vulhub"]
+	path = kb/vulhub
+	url = https://github.com/vulhub/vulhub.git
+	shallow = true
+[submodule "kb/nuclei-templates"]
+	path = kb/nuclei-templates
+	url = https://github.com/projectdiscovery/nuclei-templates.git
+	shallow = true
+[submodule "kb/PayloadsAllTheThings"]
+	path = kb/PayloadsAllTheThings
+	url = https://github.com/swisskyrepo/PayloadsAllTheThings.git
+	shallow = true
