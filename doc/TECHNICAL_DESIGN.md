@@ -6,8 +6,8 @@
 
 | 项目 | 说明 |
 |------|------|
-| 文档版本 | v1.0 |
-| 文档日期 | 2026-08-15 |
+| 文档版本 | v1.1 |
+| 文档日期 | 2026-08-31 |
 | 适用代码基线 | Cruiser 主分支（`main.py` + `cruiser/` 包） |
 | 读者对象 | 安全研究人员、Agent 系统开发者、评测平台对接方 |
 
@@ -92,6 +92,7 @@ flowchart TB
         VPNM["VPN 管理<br/>openvpn + 路由修复"]
         CTRM["容器治理<br/>启动 / 预热 / 回收僵尸"]
         REAP["进程治理<br/>atexit killpg / 孤儿清理"]
+        DASH["运行台 dashboard.py<br/>:8765"]
     end
 
     subgraph L2["执行层（worker 子进程 × N）"]
@@ -108,7 +109,7 @@ flowchart TB
 
     subgraph EXT["外部依赖"]
         SDK[("TSec Benchmark 平台<br/>list/start/hint/submit/close")]
-        LLM[("LLM 端点<br/>DeepSeek / Kimi")]
+        LLM[("LLM 端点<br/>DeepSeek / Kimi / GLM")]
         RANGE[("靶场容器群<br/>经 VPN 直连")]
     end
 
@@ -116,9 +117,13 @@ flowchart TB
         BB["info_&lt;code&gt;.txt<br/>共享黑板"]
         TB["tasks_&lt;code&gt;.txt<br/>任务板"]
         HINT["hint_&lt;code&gt;.txt / desc_&lt;code&gt;.txt"]
+        RT["_runtime.json 运行态快照"]
     end
 
     SCH -->|spawn 子进程| W1 & W2 & W3
+    SCH --> DASH
+    DASH --> BB & TB & HINT & RT
+    SCH -->|写入快照| RT
     W1 --> C1
     W2 --> C2
     W3 --> C3
@@ -140,7 +145,7 @@ main.py（调度器）→ main.py --sessions 1（worker）→ claude CLI → bas
 
 | 层 | 进程 | 职责 | 崩溃影响面 |
 |----|------|------|------------|
-| 调度层 | `main.py` 主进程 | 唯一与平台交互的进程：轮询未解题目、分层调度、spawn worker、监控 `[COUNT]` 步数、回收容器与孤儿进程 | 全局退出，`atexit` 整组清理 worker 并关闭活跃容器 |
+| 调度层 | `main.py` 主进程 | 唯一与平台交互的进程：轮询未解题目、分层调度、spawn worker、监控 `[COUNT]` 步数、回收容器与孤儿进程、拉起运行台 | 全局退出，`atexit` 整组清理 worker 并关闭活跃容器 |
 | 执行层 | worker 子进程（带 `CRUISER_WORKER_ID`） | 调用 `run_auto_scan()`，拉起并解析 claude 流式输出，触发 watcher，权威校验 flag | 单题单会话失败，不影响其他题目 |
 | Agent 层 | `claude` CLI 进程 | 真正的解题智能体，用内置 Bash/Read/Write 工具侦察与利用 | 会话结束，worker 收尾后可重启新会话 |
 
@@ -170,7 +175,7 @@ sequenceDiagram
             C->>R: 侦察 / 漏洞验证 / 利用（Bash 工具）
             R-->>C: 响应（含 flag 线索）
             C->>F: PostToolUse 每 10 步注入最新黑板
-            W->>W: 每 6 步后台触发 watcher 策展
+            W->>W: 默认每 4 步后台触发 watcher 策展
             C->>P: submit_flag.py 提交候选 flag
             P-->>C: correct / awarded / 进度 X/Y
         end
@@ -200,10 +205,10 @@ sequenceDiagram
 
 ```
 Cruiser/
-├── main.py                  # CLI 入口：平台调度、多会话并发、分层调度、容器/进程治理
-├── blackboard_hook.py       # Claude Code 钩子：黑板/任务板硬注入模型上下文
+├── main.py                  # CLI 入口：平台调度、多会话并发、分层调度、容器/进程治理、运行台
+├── blackboard_hook.py       # Claude Code 钩子：描述/提示/黑板硬注入模型上下文
 ├── kill_orphans.py          # 悬空 worker/claude 进程清理兜底
-├── connect_vpn.sh           # 手动连接靶场 VPN 并修复推送路由
+├── frontend/                # 运行台静态资源（console.js / console.css / index.html）
 ├── tools/                   # Agent 调用的 CLI 封装脚本
 │   ├── submit_flag.py       # 命令行提交 flag（经 SDK 平台确认）
 │   ├── dirsearch_scan.py    # 跨会话去重的目录扫描（同一 URL 只实扫一次）
@@ -213,16 +218,18 @@ Cruiser/
 ├── cruiser/
 │   ├── __init__.py          # 包初始化：禁用 LangSmith 追踪、加载 .env
 │   ├── claude_agent.py      # 当前解题引擎：claude CLI 驱动 + 黑板 watcher
+│   ├── dashboard.py         # 运行台 HTTP：快照 / 黑板 / 任务板 / 日志
+│   ├── runtime.py           # 调度器运行态快照（供运行台读取）
 │   ├── taskboard.py         # 任务板读写（文件锁 + 原子重写）
-│   ├── llm.py               # LLM 提供方注册表与路由（DeepSeek / Kimi）
+│   ├── llm.py               # LLM 提供方注册表与路由（DeepSeek / Kimi / GLM）
 │   ├── prompt.py            # 系统提示词与任务模板
 │   ├── tools.py             # SDK 客户端、submit_flag、dirsearch/xss 等工具
 │   └── agent.py             # 旧版手写 ReAct 引擎（已弃用，保留供参考）
 ├── resource/                # 用户名/密码/XSS payload/flag 线索字典
-├── kb/                      # 离线漏洞知识库（vulhub / nuclei-templates / PayloadsAllTheThings / bin/nuclei）
-├── vpn/                     # 靶场 VPN 配置（*.ovpn）
+├── kb/                      # 离线漏洞知识库（git submodule：vulhub / nuclei-templates / PayloadsAllTheThings；nuclei 二进制需自行下载）
+├── vpn/                     # 靶场 VPN 配置（空目录入库；*.ovpn 不入库）
 ├── doc/                     # SDK 接入文档 + 本文档
-└── reports/                 # 运行时共享黑板 / 任务板 / 提示 / 描述文件
+└── reports/                 # 运行时共享黑板 / 任务板 / 提示 / 描述 / 运行态快照（空目录入库）
 ```
 
 ### 3.2 调度层（`main.py` 主进程）
@@ -241,7 +248,7 @@ Cruiser/
 
 3. **worker 生命周期管理**
    - `spawn_worker()`：以 `main.py --sessions 1 --challenge-code <CODE>` 形式 fork 子进程，注入 `CRUISER_WORKER_ID`（兼作「跳过 VPN/容器管理」的身份标记）、`CRUISER_WORKSPACE_DIR`、目标地址、模型（`ANTHROPIC_MODEL`）等环境变量；worker 以 `start_new_session` 启动为**独立进程组**。
-   - `reader_thread()`：逐行读取 worker 输出，解析 `[COUNT]`、`flag 进度 X/Y`、最终 `{"flag"}` JSON，驱动阈值停止与胜出判定。
+   - `reader_thread()`：逐行读取 worker 输出，解析 `[COUNT]`，把日志推入运行态；整题是否解出以 SDK 轮询（`is_completed` / flag 进度）为准。
    - 退出清理：`atexit` + SIGINT/SIGTERM 处理器对所有 worker 进程组 `killpg`，并关闭活跃容器；`kill_orphans.py` 作为父进程意外死亡后的悬空进程兜底清理。
 
 4. **冷却与去重**
@@ -256,7 +263,7 @@ worker 是 `main.py` 自身的副本，因带 `CRUISER_WORKER_ID` 而跳过 VPN/
 2. 在工作空间写入 `.claude/settings.json` 注册黑板钩子（见 §5.2）；
 3. 拉起 `claude` CLI 子进程（**不**使用 `start_new_session`，使其留在本进程组内，调度器 `killpg` 时可整组回收）；
 4. 逐行解析 stream-json 事件流：
-   - `assistant` 事件：`[COUNT]` 步数 +1、提取文本与工具调用、滚动维护最近活动摘要（`deque(maxlen=12)`）、每 6 步触发一次后台 watcher、捕获模型提交的 flag 并**当场权威校验**；
+   - `assistant` 事件：`[COUNT]` 步数 +1、提取文本与工具调用、滚动维护最近活动摘要（默认 `deque(maxlen=48)`，`CRUISER_WATCHER_RECENT`）、默认每 4 步（`CRUISER_WATCHER_EVERY`）触发一次后台 watcher、捕获模型提交的 flag 并**当场权威校验**；
    - `user` 事件（工具结果）：正则收集 `flag{...}` 候选，追加观察摘要；
    - `result` 事件：会话结束（success / error_max_turns / error_*），跳出循环；
 5. 收尾：会话结束时同步触发一次最终 watcher（30s 超时保护），并对全部 flag 候选逐个程序化补交校验（命中即输出 `[FLAG RECOVERED]`）。
@@ -376,7 +383,7 @@ flowchart LR
     end
 
     subgraph 策展侧
-        WA["Watcher LLM (deepseek-v4-pro)<br/>每 6 步后台审阅"]
+        WA["Watcher LLM (deepseek-v4-pro)<br/>默认每 4 步后台审阅"]
     end
 
     C1 & C2 & C3 -->|写入发现/任务回报| BB
@@ -385,7 +392,7 @@ flowchart LR
     C1 & C2 & C3 -->|claim 认领(先到先得)| TB
     BB & TB & DK --> HK
     HK -->|additionalContext 硬注入| C1 & C2 & C3
-    C1 & C2 & C3 -.->|每6步活动摘要触发| WA
+    C1 & C2 & C3 -.->|默认每4步活动摘要触发| WA
 ```
 
 ### 5.2 上下文硬注入（`blackboard_hook.py`）
@@ -413,16 +420,17 @@ flowchart LR
 
 **Watcher 策展**（`_watcher_curate_blackboard`）：
 
-- 每个会话每 6 步在后台线程触发一次（单 watcher 并发闸 `busy` 标志防重入）；会话结束时强制补一次尾部采集（30s join 超时，防止 daemon 线程随进程退出丢失最后发现）；
-- watcher LLM（`deepseek-v4-pro`，策展与方向规划需要更强推理）基于：题目描述 + 提示 + 最近 12 条活动摘要 + 当前黑板 + 任务板（待认领/执行中），产出结构化 JSON：
-  - `add`（≤3 条）：提取新关键信息；
-  - `update`（≤3 条）：修正过时/错误条目（保留原头部的时间戳与会话归属，仅替换信息内容）；
-  - `remove`（≤3 条）：删除失效条目；
+- 每个会话默认每 4 步（`CRUISER_WATCHER_EVERY`）在后台线程触发一次（单 watcher 并发闸 `busy` 标志防重入）；会话结束时强制补一次尾部采集（30s join 超时，防止 daemon 线程随进程退出丢失最后发现）；
+- watcher LLM（`deepseek-v4-pro`，策展与方向规划需要更强推理）基于：题目描述 + 提示 + 最近活动窗口（默认 48 条，近 12 条保留全文）+ 当前黑板 + 任务板（待认领/执行中），产出结构化 JSON：
+  - `add`（≤3 条）：提取新关键信息（普通条目不超过 80 字）；**不写入具体 flag 值，也不新增 `[flag方法]`**；
+  - `update`（≤3 条）：修正过时/错误条目（保留原头部的时间戳与会话归属，仅替换信息内容；不改 `[flag方法]`）；
+  - `remove`（≤3 条）：删除失效条目（含具体 flag 值的条目一律删；`[flag方法]` 除非漏了 flag 字面量否则不删）；
   - `suggest_tasks`（≤2 条）：向任务板推荐新探索方向；
   - `retire_tasks`（≤3 条）：下架重复/过时方向；
 - **并发安全应用变更**：LLM 审阅基于无锁快照；应用变更时持文件锁重读最新内容，按**内容模糊匹配**（归一化包含关系或字符 bigram 重叠系数 ≥ 0.6）定位条目——不用行号，规避并发编辑导致的行号漂移；写回走临时文件 + `os.replace` 原子替换；
 - watcher 失败静默吞掉，绝不影响解题主流程；
-- 附带职责：从活动与黑板中提取 `flag{...}` 候选并程序化兜底提交——**watcher 也能交 flag**。
+- 附带职责：从活动与黑板中提取 `flag{...}` 候选并程序化兜底提交——**watcher 也能交 flag**（同一段超过 5 个候选视为爆破输出，不自动交）；
+- **`[flag方法]`**：首次提交成功时由该会话分叉写入（漏洞点/请求/步骤，不含 flag 字面量），供其他会话复现剩余 flag；watcher 不增删改。
 
 ### 5.4 探索方向任务板（`cruiser/taskboard.py`）
 
@@ -480,22 +488,23 @@ flowchart TD
     C -->|是| Z
     C -->|否| D[框架亲自调用 submit_flag.py<br/>提交平台]
     D --> E{平台返回 correct / duplicate?}
-    E -->|是| F[确认 flag<br/>输出 final JSON 并停止]
+    E -->|是| F[记录进度；全部 flag 到手才停整题]
     E -->|否| G[继续解题<br/>候选留待收尾复核]
 ```
 
-- `_verify_flag()` 对同一候选只核实一次（`verified` 集合去重），避免重复提交；
-- **当场校验**：模型一调用提交工具，框架立即亲自向平台核实，命中即停止会话；
+- `_verify_flag()` 对同一候选只核实一次（`verified` 集合去重），避免重复提交；返回结构化 `FlagSubmitOutcome`（含 `correct/total`），多 flag 未集齐时会话继续；
+- **当场校验**：模型一调用提交工具，框架立即亲自向平台核实；
 - **收尾补交**：会话结束（出 flag / 达轮数上限 / 自然结束）时，对全部合法候选按长度降序逐个补交——覆盖「flag 在最后一回合找到、提交命令被 `--max-turns` 切断」等情况，命中打印 `[FLAG RECOVERED]`；
-- watcher 策展前也先执行一轮候选兜底提交（即便无可用 watcher LLM 也能补交）。
+- watcher 策展前也先执行一轮候选兜底提交（即便无可用 watcher LLM 也能补交）；
+- 同一段文本出现超过 5 个 `flag{...}` 视为爆破/枚举输出，框架不自动提交（模型主动调用 `submit_flag.py` 仍放行）。
 
 ### 6.2 多 Flag 题目的完成判定
 
 一道题可能有多个 flag（`flag_count > 1`），规则：
 
-- `submit_flag` 的同步返回包含「flag 进度 X/Y」，reader 线程实时解析记录；
-- **仅当 X ≥ Y（全部 flag 到手）才判定整题解出**、置 winner 停止整组；
-- worker 输出最终 `{"flag"}` JSON 时：单 flag 或总数未知视为完成；多 flag 未集齐则继续运行（`_json_flag_is_final`）。
+- `submit_flag` 的同步返回包含「flag 进度 X/Y」，框架记入 `FlagSubmitOutcome`；
+- **仅当平台 `is_completed` 或 `correct_flag_count ≥ flag_count` 才判定整题解出**、置 winner 停止整组（调度器以 SDK 轮询为准，不解析 worker 的最终 JSON）；
+- 单会话内未集齐全部 flag 时继续运行，不因交对一枚就结束。
 
 ---
 
@@ -510,17 +519,21 @@ flowchart LR
     M[模型名] --> P{前缀匹配<br/>MODEL_PREFIX_TO_PROVIDER}
     P -->|"deepseek*"| DS[deepseek 提供方<br/>DEEPSEEK_API_KEY]
     P -->|"kimi-* / moonshot*"| KM[kimi 提供方<br/>KIMI_API_KEY]
+    P -->|"glm-* / chatglm* / zhipu*"| GLM[glm 提供方<br/>GLM_API_KEY]
     P -->|未命中| DS
     DS --> E1[Anthropic 端点<br/>claude CLI 用]
     DS --> E2[OpenAI 兼容端点<br/>langchain watcher 用]
     KM --> E1
     KM --> E2
+    GLM --> E1
+    GLM --> E2
 ```
 
 | 提供方 | 密钥环境变量 | 比赛内网端点（默认） | 本地端点（`--local`） |
 |--------|--------------|----------------------|------------------------|
 | deepseek | `DEEPSEEK_API_KEY` | `http://api.deepseek.com.tsecbench.gw/{anthropic,v1}` | `https://api.deepseek.com/{anthropic,v1}` |
 | kimi (moonshot) | `KIMI_API_KEY` | `http://api.moonshot.cn.tsecbench.gw/{anthropic,v1}` | `https://api.moonshot.cn/{anthropic,v1}` |
+| glm（TokenHub） | `GLM_API_KEY` | `http://tokenhub.tencentmaas.com.tsecbench.gw` | `https://tokenhub.tencentmaas.com` |
 
 端点解析优先级：**显式环境变量覆盖 > 本地模式官方域名 > 比赛内网域名**。新接一家提供方只需在 `PROVIDERS` 注册表加一条配置 + 在 `MODEL_PREFIX_TO_PROVIDER` 加前缀，无需改任何调用方。
 
@@ -586,7 +599,7 @@ flowchart TD
 
 - 仅主进程执行；spawn 的 worker 子进程带 `CRUISER_WORKER_ID` 会跳过；
 - 路由修复：本环境 openvpn 2.5 的 sitnl 对部分推送路由添加失败（Network is unreachable），统一改用 `ip route replace <net>/<mask> dev tun0` 直连设备方式兜底；
-- 手动维护通道：`connect_vpn.sh` 供人工调试时连接并修复路由。
+- 手动维护通道：本地可自备 `connect_vpn.sh`（已 gitignore，不入库）供人工调试时连接并修复路由。
 
 ---
 
@@ -614,7 +627,7 @@ flowchart TD
 
 ### 10.3 离线知识库与字典
 
-- `kb/`：vulhub / nuclei-templates / PayloadsAllTheThings + `kb/bin/nuclei` 可执行文件，支持按 CVE/组件本地检索 PoC（`CRUISER_KB_DIR` 可覆盖路径）——配合禁网规则，全部情报来源本地化；
+- `kb/`：三个 git submodule（[vulhub](https://github.com/vulhub/vulhub) / [nuclei-templates](https://github.com/projectdiscovery/nuclei-templates) / [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)），clone 时加 `--recurse-submodules`；`kb/bin/nuclei` 超过 GitHub 单文件限制，需从 [Releases](https://github.com/projectdiscovery/nuclei/releases) 自行下载。`CRUISER_KB_DIR` 可覆盖路径。配合禁网规则，全部情报来源本地化；
 - `resource/`：`username.txt` / `password.txt` / `xss.txt` 字典与 `flag_hunting.txt`（flag 线索清单）。
 
 ---
@@ -640,11 +653,13 @@ flowchart TD
 | 分类 | 变量 | 说明 |
 |------|------|------|
 | 平台 | `BENCHMARK_BASE_URL` / `BENCHMARK_TOKEN` | 平台 API 地址与跑分凭证（必填） |
-| 密钥 | `DEEPSEEK_API_KEY` / `KIMI_API_KEY` | 按模型名前缀自动选用 |
-| 模型 | `DEEPSEEK_MODEL` / `ANTHROPIC_MODEL` / `WATCHER_MODEL` / `CRUISER_SOLVER_MODEL` | 解题 / watcher / solver 模型 |
+| 密钥 | `DEEPSEEK_API_KEY` / `KIMI_API_KEY` / `GLM_API_KEY` | 按模型名前缀自动选用 |
+| 模型 | `CRUISER_MODEL` / `ANTHROPIC_MODEL` / `WATCHER_MODEL` / `CRUISER_SOLVER_MODEL` | 解题 / watcher / solver 模型 |
 | 上下文 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS`（1M）/ `CLAUDE_CODE_AUTO_COMPACT_WINDOW`（800K） | 校正 auto-compact 触发时机 |
 | 调度 | `CRUISER_MAX_ACTIVE`（3）/ `CRUISER_CONTAINER_WARMUP`（60s） | 活跃名额 / 容器就绪探测 |
 | 协作 | `CRUISER_TEMP_MIN/MAX`（0.0/0.9） | 多会话温度分片区间 |
+| watcher | `CRUISER_WATCHER_EVERY`（4）/ `CRUISER_WATCHER_RECENT`（48） | 策展频率与活动窗口 |
+| 运行台 | `CRUISER_DASHBOARD` / `CRUISER_DASHBOARD_HOST` / `CRUISER_DASHBOARD_PORT` | 默认 `127.0.0.1:8765`；`=0` 关闭 |
 | solver | `CRUISER_SOLVER_MAX_TURNS`（40）/ `CRUISER_MAX_SOLVERS`（3） | solver 回合与并发上限 |
 | 逆向 | `GHIDRA_INSTALL_DIR` / `JAVA_HOME` | PyGhidra 运行环境 |
 
@@ -683,7 +698,9 @@ flowchart TD
 
 ## 13. 可观测性
 
-系统全部通过结构化 stdout 标记输出，便于 `tee` 落盘与 `grep` 检索：
+调度主进程默认在 `http://127.0.0.1:8765` 拉起运行台（`cruiser/dashboard.py`），展示题目队列、黑板、任务板、flag 进度与 worker 日志。独立进程可用 `uv run python -m cruiser.dashboard`（只读 `reports/`）。`CRUISER_DASHBOARD=0` 关闭。
+
+系统同时通过结构化 stdout 标记输出，便于 `tee` 落盘与 `grep` 检索：
 
 | 标记 | 含义 |
 |------|------|
@@ -711,7 +728,9 @@ flowchart TD
 ### 14.2 安装与启动
 
 ```bash
-# 安装 uv 与依赖
+# 克隆（含 kb/ 三个 submodule）与依赖
+git clone --recurse-submodules https://github.com/TJR181/Cruiser-Agent.git
+cd Cruiser-Agent
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
@@ -731,6 +750,9 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 
 # 本地联网调试（LLM 端点切回官方域名）
 uv run python main.py --sessions 3 --local
+
+# 浏览器打开运行台（主进程已拉起时）
+# http://127.0.0.1:8765
 ```
 
 > 离线部署说明：`uv sync` 只装核心依赖，解题中 Agent 还会按需临时加装 Python 包（`web3`/`slither`/`angr` 等）。离线镜像直接整份分发已就绪的 `.venv`，而非在目标环境重新 sync。
@@ -755,7 +777,7 @@ uv run python main.py --sessions 3 --local
 2. **平台名额硬约束**：`CRUISER_MAX_ACTIVE` 必须与平台实际配额一致，否则出现启动拒绝或名额浪费。
 3. **提示扣分**：三级起拉取提示会按比例扣减得分，属设计取舍（宁可扣分也要解出），不适合「禁提示」规则的赛事。
 4. **黑盒定位**：当前流程全程黑盒（无源码审计通道）；对需源码辅助的题目依赖 Agent 自行从靶场读源码（文件包含/命令执行后优先读源码已写入提示词）。
-5. **watcher 成本**：每 6 步一次 pro 级模型调用，token 开销随会话数线性增长。
+5. **watcher 成本**：默认每 4 步一次 pro 级模型调用，token 开销随会话数线性增长（可用 `CRUISER_WATCHER_EVERY` 调稀）。
 6. **文件总线规模**：单题黑板依赖 watcher 策展控制体量；极端长会话下黑板仍可能膨胀，注入端以尾部 3000 字符截断兜底。
 
 ---
@@ -769,7 +791,7 @@ uv run python main.py --sessions 3 --local
 | solver 策略强化 | 根据任务板认领完成率动态扩缩 solver 数；引入方向优先级 |
 | 多题知识迁移 | 跨题目沉淀可复用利用模式（当前知识库为静态离线 PoC） |
 | 恢复点能力 | 会话中断后基于黑板 + 活动摘要续跑，而非从零开始 |
-| 评测报表 | 汇总每题解题路径、步数、token 消耗，输出可视化跑分报告 |
+| 评测报表 | 运行台已覆盖实时队列/黑板/日志；可再汇总每题步数与 token 消耗 |
 
 ---
 
@@ -779,8 +801,10 @@ uv run python main.py --sessions 3 --local
 
 | 文件 | 职责 |
 |------|------|
-| `main.py` | CLI 入口、VPN、容器治理、分层调度主循环、worker/solver 生命周期 |
-| `cruiser/claude_agent.py` | claude CLI 驱动、stream-json 解析、watcher 策展、flag 权威校验 |
+| `main.py` | CLI 入口、VPN、容器治理、分层调度主循环、worker/solver 生命周期、运行台 |
+| `cruiser/claude_agent.py` | claude CLI 驱动、stream-json 解析、watcher 策展、flag 权威校验、`[flag方法]` 写入 |
+| `cruiser/dashboard.py` | 运行台 HTTP 服务 |
+| `cruiser/runtime.py` | 调度器运行态快照与 `reports/` 汇编 |
 | `cruiser/llm.py` | LLM 提供方注册表、模型路由、温度分片 |
 | `cruiser/taskboard.py` | 任务板发布/认领/回报/下架（文件锁 + 原子重写 + 相似度判重） |
 | `cruiser/prompt.py` | 系统提示词与任务模板（探索 / solver 两套） |
@@ -798,6 +822,8 @@ uv run python main.py --sessions 3 --local
 | `tasks_<code>.txt.claimed` | 认领日志（45min TTL） | claim_task | publish 判重、watcher |
 | `hint_<code>.txt` | 题目提示 | 主进程（三级拉取） | 钩子注入、watcher |
 | `desc_<code>.txt` | 题目描述 | 主进程 | 钩子注入、watcher |
+| `_runtime.json` | 调度器运行态快照 | 主进程 | 运行台（独立进程模式） |
+| `_flagstore.json` | 跨进程正确/错误 flag 记忆 | submit_flag | 提交预检、前缀学习 |
 
 ---
 

@@ -6,7 +6,7 @@ Cruiser 是一个面向 CTF 竞赛评测平台（TSec Benchmark）的自动化 W
 
 Cruiser 的解题引擎基于 [`claude` CLI](https://docs.anthropic.com/en/docs/claude-code)（`--output-format stream-json` 流式模式）驱动一个自主 Agent，Anthropic 兼容端点默认接入 DeepSeek。系统分为三层进程，边界清晰、崩溃可恢复：
 
-1. **调度层（`main.py` 主进程）** — 唯一与平台交互的进程。轮询未解题目、按难度分层调度、启动 worker、监控 `[COUNT]` 步数、回收容器与孤儿进程。
+1. **调度层（`main.py` 主进程）** — 唯一与平台交互的进程。轮询未解题目、按难度分层调度、启动 worker、监控 `[COUNT]` 步数、回收容器与孤儿进程，并在本机拉起运行台（默认 `http://127.0.0.1:8765`）。
 2. **执行层（worker 子进程）** — `main.py --sessions 1 --challenge-code <CODE>` 的副本，带 `CRUISER_WORKER_ID`。调用 `run_auto_scan()`，进而拉起 `claude` CLI 进程。
 3. **Agent 层（`claude` CLI 进程）** — 真正的解题智能体，使用其内置的 Bash/Read/Write 等工具执行侦察与利用。
 
@@ -33,15 +33,15 @@ Cruiser 的解题引擎基于 [`claude` CLI](https://docs.anthropic.com/en/docs/
 
 ## 共享黑板机制
 
-- **上下文硬注入（`blackboard_hook.py`）** — 在 worker 工作目录写入 `.claude/settings.json` 注册钩子：`SessionStart` 开局注入一次黑板 + 任务板，`PostToolUse` 每 10 次工具调用注入一次最新内容，通过 `additionalContext` 物理进入模型上下文，不依赖模型自觉读取。
-- **黑板策展 Watcher** — 每 6 步在后台由独立的 watcher LLM 审阅该会话最近活动，维护黑板质量（提取新关键信息、修正/删除失效条目）并向任务板推荐探索方向。应用变更时按内容模糊匹配定位条目，规避并发行号漂移。watcher 使用 **`deepseek-v4-pro`** 模型（可经 `WATCHER_MODEL` 覆盖），策展与方向规划需要更强的推理能力。
+- **上下文硬注入（`blackboard_hook.py`）** — 在 worker 工作目录写入 `.claude/settings.json` 注册钩子：`SessionStart` 开局注入一次题目描述 + 提示 + 当前黑板，`PostToolUse` 每 10 次工具调用注入一次最新内容，通过 `additionalContext` 物理进入模型上下文，不依赖模型自觉读取。
+- **黑板策展 Watcher** — 默认每 4 步（`CRUISER_WATCHER_EVERY`）在后台由独立的 watcher LLM 审阅该会话最近活动，维护黑板质量（提取新关键信息、修正/删除失效条目）并向任务板推荐探索方向。首次提交成功时由提交会话单独写入 `[flag方法]`，watcher 不增删改这类条目。应用变更时按内容模糊匹配定位条目，规避并发行号漂移。watcher 使用 **`deepseek-v4-pro`** 模型（可经 `WATCHER_MODEL` 覆盖）。
 
 ## 项目结构
 
 ```
 Cruiser/
 ├── main.py                  # CLI 入口：平台调度、多会话并发、分层调度、容器/进程治理
-├── blackboard_hook.py       # Claude Code 钩子：黑板/任务板硬注入模型上下文
+├── blackboard_hook.py       # Claude Code 钩子：描述/提示/黑板硬注入模型上下文
 ├── kill_orphans.py          # 悬空 worker/claude 进程清理兜底
 ├── frontend/                # 运行台静态资源（由 cruiser/dashboard.py 提供）
 ├── tools/                   # Agent 调用的 CLI 封装脚本
@@ -131,8 +131,8 @@ GLM_API_KEY=<腾讯 TokenHub 密钥>           # 选填：当 worker/watcher 指
 > 开启 thinking（`MAX_THINKING_TOKENS=32000`，可调）。glm-5.3/5.2 上下文窗口为 1M
 > （框架默认按此管理压缩）；glm-5.1/5/5-turbo 等老模型为 200K，使用时请显式设置
 > `CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000`。
-> TokenHub 默认走公网端点 `https://tokenhub.tencentmaas.com`，可用
-> `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` 覆盖。
+> TokenHub 默认走比赛内网 `http://tokenhub.tencentmaas.com.tsecbench.gw`；`--local` 切回
+> 公网 `https://tokenhub.tencentmaas.com`。亦可用 `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` 覆盖。
 
 > **端点默认值**:各提供方端点默认使用比赛内网形式(http + `.tsecbench.gw` 后缀,如
 > `http://api.deepseek.com.tsecbench.gw/v1`)。本地联网调试时加 `--local` 参数即切回原始官方
@@ -148,7 +148,7 @@ GLM_API_KEY=<腾讯 TokenHub 密钥>           # 选填：当 worker/watcher 指
 uv run python main.py --sessions 5
 ```
 
-主进程自动连接 VPN、清理遗留容器，然后持续拉取未解题目并按分层调度并发解题。
+主进程自动连接 VPN、清理遗留容器，然后持续拉取未解题目并按分层调度并发解题。浏览器打开 `http://127.0.0.1:8765` 可看运行台。
 
 ### 指定单目标扫描
 
@@ -179,7 +179,7 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 | `DEEPSEEK_API_KEY` | DeepSeek 密钥（解题引擎与 watcher 默认使用） |
 | `KIMI_API_KEY` | Kimi/Moonshot 密钥（当模型为 `kimi-*` 时自动使用） |
 | `GLM_API_KEY` | 腾讯 TokenHub 密钥（当模型为 `glm-*` 时自动使用） |
-| `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` | GLM 的 Anthropic / OpenAI 兼容端点（默认 `https://tokenhub.tencentmaas.com`、`.../v1`） |
+| `GLM_ANTHROPIC_BASE_URL` / `GLM_BASE_URL` | GLM 的 Anthropic / OpenAI 兼容端点（默认比赛内网 `http://tokenhub.tencentmaas.com.tsecbench.gw`、`.../v1`；`--local` 切回 `https://tokenhub.tencentmaas.com/...`） |
 | `CRUISER_MODEL` | 解题引擎模型（最高优先级，覆盖 `ANTHROPIC_MODEL`/`DEEPSEEK_MODEL`；推荐跨厂商指定方式，如 `glm-5.3`） |
 | `KIMI_ANTHROPIC_BASE_URL` / `KIMI_BASE_URL` | Kimi 的 Anthropic / OpenAI 兼容端点（默认比赛内网 `http://api.moonshot.cn.tsecbench.gw/anthropic`、`.../v1`；`--local` 切回 `https://api.moonshot.cn/...`） |
 | `DEEPSEEK_MODEL` / `ANTHROPIC_MODEL` | 解题引擎模型（默认 `deepseek-v4-flash`） |
@@ -189,6 +189,12 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | 提前触发上下文压缩的阈值 token 数（默认 `800000`，留出余量避免逼近硬上限） |
 | `WATCHER_MODEL` | 黑板 watcher 模型（默认 `deepseek-v4-pro`） |
 | `WATCHER_TEMPERATURE` | watcher 温度（默认不传，交由服务端决定） |
+| `CRUISER_WATCHER_EVERY` | 每多少步触发一次 watcher（默认 4） |
+| `CRUISER_WATCHER_RECENT` | watcher 活动窗口条数（默认 48；最近 12 条保留全文） |
+| `CRUISER_WATCHER_SUBMIT` | 设为 `0` 关闭 watcher 兜底自动提交 flag |
+| `CRUISER_DASHBOARD` | 设为 `0` 关闭运行台（默认开启） |
+| `CRUISER_DASHBOARD_HOST` / `CRUISER_DASHBOARD_PORT` | 运行台监听地址与端口（默认 `127.0.0.1:8765`） |
+| `CRUISER_LOG_FILE` | 运行台读取的调度日志路径（默认 `/tmp/cruiser.log`） |
 | `CRUISER_MAX_ACTIVE` | 平台活跃容器名额上限（默认 3） |
 | `CRUISER_LOCAL` | 设为 `1` 启用本地测试模式（大模型端点切回原始官方 https 域名）；等价于 `--local` |
 | `CRUISER_CONTAINER_WARMUP` | 容器就绪探测上限秒数（默认 60）：拿到地址后主动探测目标端口，可连即拉起会话，超时也放行交由 LLM 解题以防卡死 |
@@ -213,6 +219,7 @@ uv run python main.py --target http://<IP:端口> --challenge-code <CODE>
 | `tools/task_board.py` | 任务板 `list` / `claim` / `report` |
 | `tools/decompile.py` | PyGhidra 无头反编译：输出 C 伪码，并标注被编译器消除的取数、switch 各 case 语义与未确认的 opcode |
 | `kill_orphans.py` | 清理父进程已死的悬空 worker/claude 进程组 |
+| `cruiser/dashboard.py` | 运行台 HTTP（调度主进程自动拉起；也可 `uv run python -m cruiser.dashboard`） |
 | Web/渗透 | `dirsearch` / `sqlmap` / `fenjing` / `nuclei`（内置模板库）/ `ffuf` / `whatweb` / Metasploit + PostgreSQL |
 | 逆向/Pwn | Ghidra + PyGhidra / `radare2` / `pwntools` / `angr` / `ropper` / `one_gadget` / GDB |
 | 密码/取证 | `pycryptodome` / `gmpy2` / `sympy` / `z3` / `steghide` / `zsteg` / `binwalk` 等 |
